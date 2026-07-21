@@ -1,0 +1,56 @@
+[package]
+name = "codexplus"
+version = "0.1.0"
+edition = "2021"
+description = "Windows title-bar overlay that surfaces Codex usage limits"
+license = "MIT"
+publish = false
+
+[lib]
+name = "codexplus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codexplus"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+dirs = "6"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_ProcessStatus",
+] }
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input"] }
+winres = "0.1"
+
+[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[dev-dependencies]
+tempfile = "3"

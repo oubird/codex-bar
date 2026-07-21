@@ -10,3 +10,9 @@ Thumbs.db
 # Logs / temp
 *.log
 *.tmp
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+*.pdb
