@@ -16,3 +16,5 @@ pub mod storage;
 pub mod ui;
 #[cfg(windows)]
 pub mod app;
+#[cfg(windows)]
+pub mod diagnose;
