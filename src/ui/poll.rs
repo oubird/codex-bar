@@ -44,7 +44,11 @@ pub fn start() -> (PollSender, mpsc::Receiver<PollOutcome>) {
 
 #[cfg(windows)]
 fn run_poll() -> PollOutcome {
-    let provider = CodexProvider::with_default(Box::new(UreqTransport::new()));
+    let transport = match UreqTransport::new() {
+        Ok(transport) => transport,
+        Err(err) => return PollOutcome::Failure(err),
+    };
+    let provider = CodexProvider::with_default(Box::new(transport));
     match poll_once(&provider) {
         Ok(snap) => PollOutcome::Success(snap),
         Err(err) => PollOutcome::Failure(err),

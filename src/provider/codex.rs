@@ -29,6 +29,85 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Where the active proxy policy came from. This safe label is the only
+/// proxy detail callers may show in diagnostics; the URL stays private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxySource {
+    Direct,
+    CodexplusHttpsProxy,
+    HttpsProxy,
+    HttpProxy,
+}
+
+impl ProxySource {
+    pub fn diagnostic_label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::CodexplusHttpsProxy => "CODEXPLUS_HTTPS_PROXY",
+            Self::HttpsProxy => "HTTPS_PROXY",
+            Self::HttpProxy => "HTTP_PROXY",
+        }
+    }
+}
+
+/// Validated proxy state. The raw proxy URL and `ureq::Proxy` are never
+/// exposed, formatted, cached, or persisted because either can include
+/// proxy credentials.
+pub struct ProxyConfiguration {
+    source: ProxySource,
+    proxy: Option<ureq::Proxy>,
+}
+
+impl ProxyConfiguration {
+    pub fn from_environment() -> Result<Self, AppError> {
+        Self::from_env_lookup(|key| std::env::var_os(key))
+    }
+
+    pub fn source(&self) -> ProxySource {
+        self.source
+    }
+
+    fn from_env_lookup(
+        lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Self, AppError> {
+        const PROXY_ENVIRONMENT: [(&str, ProxySource); 5] = [
+            ("CODEXPLUS_HTTPS_PROXY", ProxySource::CodexplusHttpsProxy),
+            ("HTTPS_PROXY", ProxySource::HttpsProxy),
+            ("https_proxy", ProxySource::HttpsProxy),
+            ("HTTP_PROXY", ProxySource::HttpProxy),
+            ("http_proxy", ProxySource::HttpProxy),
+        ];
+
+        for (key, source) in PROXY_ENVIRONMENT {
+            let Some(raw) = lookup(key) else {
+                continue;
+            };
+            let Some(value) = raw.to_str() else {
+                return Err(AppError::ProxyConfigurationInvalid);
+            };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let parsed = url::Url::parse(value)
+                .map_err(|_| AppError::ProxyConfigurationInvalid)?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(AppError::ProxyConfigurationInvalid);
+            }
+            let proxy = ureq::Proxy::new(value)
+                .map_err(|_| AppError::ProxyConfigurationInvalid)?;
+            return Ok(Self {
+                source,
+                proxy: Some(proxy),
+            });
+        }
+        Ok(Self {
+            source: ProxySource::Direct,
+            proxy: None,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct UsageResponse {
     body: String,
@@ -176,19 +255,35 @@ impl UsageProvider for CodexProvider {
 #[cfg(windows)]
 pub struct UreqTransport {
     agent: std::sync::Mutex<ureq::Agent>,
+    proxy_source: ProxySource,
 }
 
 #[cfg(windows)]
 impl UreqTransport {
-    pub fn new() -> Self {
-        let tls = native_tls::TlsConnector::new().expect("native-tls connector");
-        let agent = ureq::AgentBuilder::new()
+    pub fn new() -> Result<Self, AppError> {
+        Self::with_proxy(ProxyConfiguration::from_environment()?)
+    }
+
+    pub fn with_proxy(configuration: ProxyConfiguration) -> Result<Self, AppError> {
+        let tls = native_tls::TlsConnector::new()
+            .map_err(|_| AppError::Internal("tls connector".into()))?;
+        let mut builder = ureq::AgentBuilder::new()
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(READ_TIMEOUT)
+            // Never let a bearer-token request follow an upstream redirect.
             .redirects(0)
-            .tls_connector(std::sync::Arc::new(tls))
-            .build();
-        Self { agent: std::sync::Mutex::new(agent) }
+            .tls_connector(std::sync::Arc::new(tls));
+        if let Some(proxy) = configuration.proxy {
+            builder = builder.proxy(proxy);
+        }
+        Ok(Self {
+            agent: std::sync::Mutex::new(builder.build()),
+            proxy_source: configuration.source,
+        })
+    }
+
+    pub fn proxy_source(&self) -> ProxySource {
+        self.proxy_source
     }
 }
 
@@ -249,7 +344,9 @@ impl ProviderTransport for UreqTransport {
                 if t.kind() == ureq::ErrorKind::ConnectionFailed
                     || t.kind() == ureq::ErrorKind::Dns
                 {
-                    Err(AppError::Network(t.to_string()))
+                    // Do not retain t.to_string(): proxy errors can include
+                    // proxy addresses or credentials.
+                    Err(AppError::Network)
                 } else {
                     Err(AppError::Timeout)
                 }
@@ -432,10 +529,82 @@ mod tests {
         }
     }
 
+    fn proxy_configuration_from(values: &[(&str, &str)]) -> Result<ProxyConfiguration, AppError> {
+        let values = values
+            .iter()
+            .map(|(key, value)| (key.to_string(), std::ffi::OsString::from(value)))
+            .collect::<std::collections::HashMap<_, _>>();
+        ProxyConfiguration::from_env_lookup(|key| values.get(key).cloned())
+    }
+
+    #[test]
+    fn proxy_prefers_codexplus_override() {
+        let proxy = proxy_configuration_from(&[
+            ("http_proxy", "http://http-lower.test:7890"),
+            ("HTTPS_PROXY", "http://https.test:7890"),
+            ("CODEXPLUS_HTTPS_PROXY", "http://127.0.0.1:7890"),
+        ])
+        .expect("valid proxy");
+        assert_eq!(proxy.source(), ProxySource::CodexplusHttpsProxy);
+    }
+
+    #[test]
+    fn proxy_prefers_https_before_http_and_skips_empty_values() {
+        let proxy = proxy_configuration_from(&[
+            ("CODEXPLUS_HTTPS_PROXY", "   "),
+            ("HTTPS_PROXY", ""),
+            ("https_proxy", "http://https-lower.test:7890"),
+            ("HTTP_PROXY", "http://http-upper.test:7890"),
+        ])
+        .expect("valid proxy");
+        assert_eq!(proxy.source(), ProxySource::HttpsProxy);
+
+        let proxy = proxy_configuration_from(&[("http_proxy", "http://127.0.0.1:7890")])
+            .expect("valid proxy");
+        assert_eq!(proxy.source(), ProxySource::HttpProxy);
+    }
+
+    #[test]
+    fn proxy_uses_direct_mode_when_no_variable_is_set() {
+        let proxy = proxy_configuration_from(&[]).expect("direct mode");
+        assert_eq!(proxy.source(), ProxySource::Direct);
+        assert!(proxy.proxy.is_none());
+    }
+
+    #[test]
+    fn invalid_proxy_never_leaks_url_or_credentials() {
+        let secret = "http://alice:s3cret@proxy.example:bad-port";
+        let err = match proxy_configuration_from(&[("CODEXPLUS_HTTPS_PROXY", secret)]) {
+            Ok(_) => panic!("invalid proxy must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, AppError::ProxyConfigurationInvalid);
+        assert!(!err.public_message().contains("alice"));
+        assert!(!err.public_message().contains("s3cret"));
+        assert!(!err.to_string().contains("proxy.example"));
+        assert!(!format!("{err:?}").contains("s3cret"));
+    }
+
+    #[test]
+    fn proxy_labels_do_not_include_configuration_values() {
+        assert_eq!(ProxySource::Direct.diagnostic_label(), "direct");
+        assert_eq!(
+            ProxySource::CodexplusHttpsProxy.diagnostic_label(),
+            "CODEXPLUS_HTTPS_PROXY"
+        );
+        assert_eq!(ProxySource::HttpsProxy.diagnostic_label(), "HTTPS_PROXY");
+        assert_eq!(ProxySource::HttpProxy.diagnostic_label(), "HTTP_PROXY");
+    }
+
     #[test]
     fn retry_class_distinguishes_categories() {
         assert_eq!(AppError::Unauthorized.retry_class(), crate::error::RetryClass::AuthFailure);
         assert_eq!(AppError::Timeout.retry_class(), crate::error::RetryClass::Network);
+        assert_eq!(AppError::Network.retry_class(), crate::error::RetryClass::Network);
+        assert_eq!(
+            AppError::ProxyConfigurationInvalid.retry_class(),
+            crate::error::RetryClass::Network
+        );
         assert_eq!(AppError::RedirectRejected.retry_class(), crate::error::RetryClass::Protocol);
     }
 }

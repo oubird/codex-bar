@@ -7,7 +7,10 @@
 
 mod codex;
 
-pub use codex::{CodexProvider, ProviderTransport, UsageResponse, codex_default_endpoint, UreqTransport};
+pub use codex::{
+    codex_default_endpoint, CodexProvider, ProviderTransport, ProxyConfiguration, ProxySource,
+    UreqTransport, UsageResponse,
+};
 
 use crate::credentials::CodexCredentials;
 use crate::error::AppError;

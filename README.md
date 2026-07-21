@@ -102,6 +102,22 @@ test result: ok. 45 passed; 0 failed; 0 ignored
 
 ---
 
+## 网络代理
+
+如果你的网络需要本机或企业 HTTP 代理才能访问 ChatGPT/Codex 后端，请在启动前设置代理环境变量。代理只影响到固定的 `wham/usage` 请求；不会改变 endpoint、不会写入缓存，也不会修改 Codex 登录态。
+
+```powershell
+# 本应用专用覆盖，优先级最高（当前机器的可用示例）
+$env:CODEXPLUS_HTTPS_PROXY = 'http://127.0.0.1:7890'
+.\target\release\codexplus.exe --diagnose
+
+# 也兼容标准 HTTPS 代理变量
+$env:HTTPS_PROXY = 'http://127.0.0.1:7890'
+.\target\release\codexplus.exe --diagnose
+```
+
+代理变量优先级：`CODEXPLUS_HTTPS_PROXY` → `HTTPS_PROXY` → `https_proxy` → `HTTP_PROXY` → `http_proxy` → 直连。空值会被跳过。`--diagnose` 日志只显示代理**来源标签**（如 `CODEXPLUS_HTTPS_PROXY`），不会记录代理地址、用户名、密码、Bearer token 或账号 ID。
+
 ## 形态说明
 
 | 状态 | 视觉效果 |

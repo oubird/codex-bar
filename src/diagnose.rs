@@ -22,12 +22,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::credentials::{credential_signature, read_credentials, resolve_auth_path};
 use crate::model::ViewState;
-use crate::provider::{CodexProvider, UsageProvider};
-use crate::storage;
+use crate::provider::{
+    CodexProvider, ProxyConfiguration, ProxySource, UreqTransport, UsageProvider,
+};
 use crate::formatting;
-
-#[cfg(windows)]
-use crate::provider::UreqTransport;
+use crate::storage;
 
 const LOG_PREFIX: &str = "codexplus-diagnose";
 
@@ -96,22 +95,9 @@ fn report_auth(report: &mut String) {
             match read_credentials(&path) {
                 Ok(creds) => {
                     writeln!(report, "  JSON parsed   : yes").ok();
-                    writeln!(
-                        report,
-                        "  access_token  : {} chars",
-                        creds.access_token.expose().chars().count()
-                    )
-                    .ok();
-                    writeln!(
-                        report,
-                        "  account_id    : {}",
-                        if creds.account_id.is_some() {
-                            "present"
-                        } else {
-                            "absent"
-                        }
-                    )
-                    .ok();
+                    // Do not reveal a token, its length, account ID, or
+                    // even an account-presence bit in the diagnostic file.
+                    writeln!(report, "  Session fields: present").ok();
                 }
                 Err(err) => {
                     writeln!(report, "  JSON parsed   : no").ok();
@@ -183,7 +169,32 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
             return None;
         }
     };
-    let provider = CodexProvider::with_default(Box::new(UreqTransport::new()));
+    let proxy_configuration = match ProxyConfiguration::from_environment() {
+        Ok(configuration) => configuration,
+        Err(err) => {
+            writeln!(report, "  Proxy mode    : invalid configuration").ok();
+            writeln!(report, "  HTTP response : <error>").ok();
+            writeln!(report, "  Detail        : {}", err.public_message()).ok();
+            writeln!(report, "  Retry class   : {:?}", err.retry_class()).ok();
+            return None;
+        }
+    };
+    writeln!(
+        report,
+        "  Proxy mode    : {}",
+        format_proxy_mode(proxy_configuration.source())
+    )
+    .ok();
+    let transport = match UreqTransport::with_proxy(proxy_configuration) {
+        Ok(transport) => transport,
+        Err(err) => {
+            writeln!(report, "  HTTP response : <error>").ok();
+            writeln!(report, "  Detail        : {}", err.public_message()).ok();
+            writeln!(report, "  Retry class   : {:?}", err.retry_class()).ok();
+            return None;
+        }
+    };
+    let provider = CodexProvider::with_default(Box::new(transport));
     match provider.fetch(&creds) {
         Ok(snapshot) => {
             writeln!(
@@ -215,6 +226,10 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
             None
         }
     }
+}
+
+fn format_proxy_mode(source: ProxySource) -> &'static str {
+    source.diagnostic_label()
 }
 
 fn report_cache_write(report: &mut String, snapshot: &crate::model::UsageSnapshot) {
