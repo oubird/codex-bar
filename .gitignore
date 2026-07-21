@@ -16,3 +16,7 @@ Thumbs.db
 **/*.rs.bk
 Cargo.lock.bak
 *.pdb
+
+# Distributables (built per release)
+/dist/
+
