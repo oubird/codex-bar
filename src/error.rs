@@ -38,6 +38,10 @@ pub enum AppError {
     WindowDurationMismatch {
         kind: WindowKind,
         actual_seconds: i64,
+        /// Canonical CodexPlus duration for this slot (e.g. 18,000 for primary,
+        /// 604,800 for weekly). Stored only to support diagnostics; never used
+        /// to coerce the accepted range, which comes from the role bounds.
+        expected_seconds: u64,
     },
     PercentInvalid(WindowKind),
     ResetInvalid(WindowKind),
@@ -110,6 +114,33 @@ impl AppError {
             AppError::CacheInvalid => "Cached usage data is unusable.",
             AppError::CacheIo(_) => "Could not write the local cache.",
             AppError::Internal(_) => "Internal error.",
+        }
+    }
+
+    /// Stable, sanitised diagnostic text suitable for the `--diagnose` log.
+    ///
+    /// Unlike [`AppError::public_message`], this may expose non-sensitive
+    /// metadata such as window kind, canonical duration, actual duration,
+    /// and the role bounds. It must never include tokens, account IDs,
+    /// proxy URLs or credentials, request headers, response bodies, or
+    /// any other sensitive context.
+    pub fn diagnostic_detail(&self) -> String {
+        match self {
+            AppError::WindowDurationMismatch {
+                kind,
+                actual_seconds,
+                expected_seconds,
+            } => {
+                let role = kind.role_label();
+                let bounds = kind
+                    .duration_bounds()
+                    .map(|(min, max)| format!("{min}..{max}"))
+                    .unwrap_or_else(|| "n/a".into());
+                format!(
+                    "kind={role} actual_seconds={actual_seconds} expected_seconds={expected_seconds} accepted_seconds={bounds}"
+                )
+            }
+            _ => self.public_message().to_string(),
         }
     }
 }

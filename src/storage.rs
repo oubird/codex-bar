@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
-use crate::model::{RateWindow, UsageSnapshot, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS};
+use crate::model::{RateWindow, UsageSnapshot, WindowKind, FIVE_HOUR_SECONDS};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -105,8 +105,8 @@ impl From<UsageSnapshot> for CacheSnapshot {
 impl TryFrom<CacheSnapshot> for UsageSnapshot {
     type Error = AppError;
     fn try_from(value: CacheSnapshot) -> Result<Self, Self::Error> {
-        let five_hour = value.five_hour.try_into()?;
-        let weekly = value.weekly.try_into()?;
+        let five_hour = value.five_hour.into_rate_window(WindowKind::FiveHour)?;
+        let weekly = value.weekly.into_rate_window(WindowKind::Weekly)?;
         let snapshot = UsageSnapshot {
             five_hour,
             weekly,
@@ -136,27 +136,27 @@ impl From<RateWindow> for CacheWindow {
     }
 }
 
-impl TryFrom<CacheWindow> for RateWindow {
-    type Error = AppError;
-    fn try_from(value: CacheWindow) -> Result<Self, Self::Error> {
-        let kind = match value.window_seconds {
-            FIVE_HOUR_SECONDS => WindowKind::FiveHour,
-            WEEKLY_SECONDS => WindowKind::Weekly,
-            other => {
-                return Err(AppError::WindowDurationMismatch {
-                    kind: WindowKind::Other,
-                    actual_seconds: other as i64,
-                })
-            }
-        };
-        if !value.used_percent.is_finite() || !(0.0..=100.0).contains(&value.used_percent) {
+impl CacheWindow {
+    /// Reconstruct the role-bound window. The caller supplies the slot so
+    /// that the round trip never has to infer a `WindowKind` from a
+    /// duration alone; that was a real source of false rejections when the
+    /// server shifted the canonical window length.
+    fn into_rate_window(self, kind: WindowKind) -> Result<RateWindow, AppError> {
+        if !kind.accepts_duration(self.window_seconds) {
+            return Err(AppError::WindowDurationMismatch {
+                kind,
+                actual_seconds: self.window_seconds as i64,
+                expected_seconds: kind.canonical_seconds().unwrap_or(FIVE_HOUR_SECONDS),
+            });
+        }
+        if !self.used_percent.is_finite() || !(0.0..=100.0).contains(&self.used_percent) {
             return Err(AppError::PercentInvalid(kind));
         }
         Ok(RateWindow {
             kind,
-            used_percent: value.used_percent,
-            window_seconds: value.window_seconds,
-            resets_at_unix: value.resets_at_unix,
+            used_percent: self.used_percent,
+            window_seconds: self.window_seconds,
+            resets_at_unix: self.resets_at_unix,
         })
     }
 }
@@ -164,7 +164,7 @@ impl TryFrom<CacheWindow> for RateWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RateWindow, UsageSnapshot, WindowKind};
+    use crate::model::{RateWindow, UsageSnapshot, WindowKind, WEEKLY_SECONDS};
 
     fn snap(used_five: f64, reset_five: i64) -> UsageSnapshot {
         UsageSnapshot {
@@ -233,5 +233,54 @@ mod tests {
         let mut broken = snap(99.0, UsageSnapshot::now() + 100);
         broken.five_hour.window_seconds = 60;
         assert_eq!(save_to(&path, &broken), Err(AppError::CacheInvalid));
+    }
+
+    #[test]
+    fn round_trip_dynamic_window_durations() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("usage-cache.json");
+        let now = UsageSnapshot::now();
+        let snapshot = UsageSnapshot {
+            five_hour: RateWindow {
+                kind: WindowKind::FiveHour,
+                used_percent: 12.5,
+                window_seconds: 6 * 3600,
+                resets_at_unix: now + 6 * 3600,
+            },
+            weekly: RateWindow {
+                kind: WindowKind::Weekly,
+                used_percent: 30.0,
+                window_seconds: 8 * 86_400,
+                resets_at_unix: now + 8 * 86_400,
+            },
+            fetched_at_unix: now,
+        };
+        save_to(&path, &snapshot).expect("save");
+        let loaded = load_from(&path).expect("ok").expect("some");
+        assert_eq!(loaded.five_hour.window_seconds, 6 * 3600);
+        assert_eq!(loaded.weekly.window_seconds, 8 * 86_400);
+    }
+
+    #[test]
+    fn load_rejects_duration_outside_role_bound() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("usage-cache.json");
+        let now = UsageSnapshot::now();
+        let mut snapshot = snap(30.0, now + 3600);
+        snapshot.five_hour.window_seconds = 30 * 60; // below PRIMARY_WINDOW_MIN_SECONDS
+        let body = serde_json::to_string(&CacheFile {
+            schema_version: SCHEMA_VERSION,
+            snapshot: CacheSnapshot::from(snapshot),
+        })
+        .unwrap();
+        std::fs::write(&path, body).unwrap();
+        let err = load_from(&path).expect_err("invalid");
+        assert!(matches!(
+            err,
+            AppError::WindowDurationMismatch {
+                kind: WindowKind::FiveHour,
+                ..
+            }
+        ));
     }
 }

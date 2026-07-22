@@ -11,7 +11,7 @@ use crate::credentials::CodexCredentials;
 use crate::error::AppError;
 use crate::model::{
     RateWindow, UsageSnapshot, WindowKind, CLOCK_SKEW_SECONDS, FIVE_HOUR_SECONDS,
-    MAX_WINDOW_SECONDS, MIN_WINDOW_SECONDS, WEEKLY_SECONDS,
+    MAX_WINDOW_SECONDS, MIN_WINDOW_SECONDS,
 };
 use crate::provider::UsageProvider;
 
@@ -201,8 +201,8 @@ impl CodexProvider {
             .ok_or(AppError::WindowMissing(WindowKind::Weekly))?;
 
         let now = UsageSnapshot::now();
-        let five = self.parse_window(WindowKind::FiveHour, primary, FIVE_HOUR_SECONDS, now)?;
-        let week = self.parse_window(WindowKind::Weekly, secondary, WEEKLY_SECONDS, now)?;
+        let five = self.parse_window(WindowKind::FiveHour, primary, now)?;
+        let week = self.parse_window(WindowKind::Weekly, secondary, now)?;
         let snap = UsageSnapshot {
             five_hour: five,
             weekly: week,
@@ -218,9 +218,9 @@ impl CodexProvider {
         &self,
         kind: WindowKind,
         window: &serde_json::Value,
-        expected_seconds: u64,
         now: i64,
     ) -> Result<RateWindow, AppError> {
+        let expected_seconds = kind.canonical_seconds().unwrap_or(FIVE_HOUR_SECONDS);
         let used_percent = window
             .get("used_percent")
             .and_then(|v| v.as_f64())
@@ -231,14 +231,23 @@ impl CodexProvider {
         if !(0.0..=100.0).contains(&used_percent) {
             return Err(AppError::PercentInvalid(kind));
         }
-        let limit_seconds = window
+        let limit_seconds_raw = window
             .get("limit_window_seconds")
             .and_then(|v| v.as_i64())
             .ok_or(AppError::ProtocolChange("limit_window_seconds"))?;
-        if !(MIN_WINDOW_SECONDS as i64..=MAX_WINDOW_SECONDS as i64).contains(&limit_seconds) {
+        if !(MIN_WINDOW_SECONDS as i64..=MAX_WINDOW_SECONDS as i64).contains(&limit_seconds_raw) {
             return Err(AppError::WindowDurationMismatch {
                 kind,
-                actual_seconds: limit_seconds,
+                actual_seconds: limit_seconds_raw,
+                expected_seconds,
+            });
+        }
+        let limit_seconds = limit_seconds_raw as u64;
+        if !kind.accepts_duration(limit_seconds) {
+            return Err(AppError::WindowDurationMismatch {
+                kind,
+                actual_seconds: limit_seconds_raw,
+                expected_seconds,
             });
         }
         let reset_at = window
@@ -246,15 +255,8 @@ impl CodexProvider {
             .and_then(|v| v.as_i64())
             .ok_or(AppError::ProtocolChange("reset_at"))?;
 
-        if (limit_seconds as u64) != expected_seconds {
-            return Err(AppError::WindowDurationMismatch {
-                kind,
-                actual_seconds: limit_seconds,
-            });
-        }
-
         let lower = now - CLOCK_SKEW_SECONDS;
-        let upper = now + (expected_seconds as i64) + CLOCK_SKEW_SECONDS;
+        let upper = now + (limit_seconds as i64) + CLOCK_SKEW_SECONDS;
         if reset_at < lower || reset_at > upper {
             return Err(AppError::ResetInvalid(kind));
         }
@@ -262,7 +264,7 @@ impl CodexProvider {
         Ok(RateWindow {
             kind,
             used_percent,
-            window_seconds: expected_seconds,
+            window_seconds: limit_seconds,
             resets_at_unix: reset_at,
         })
     }
@@ -399,6 +401,7 @@ impl ProviderTransport for UreqTransport {
 mod tests {
     use super::*;
     use crate::credentials::SecretString;
+    use crate::model::WEEKLY_SECONDS;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -488,8 +491,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_incorrect_primary_duration() {
-        let body = body_5h(10.0, 3600, 1000);
+    fn accepts_dynamic_primary_duration_within_bounds() {
+        let body = body_5h(10.0, 6 * 3600, 6 * 3600 - 60);
+        let transport = FakeTransport::new(vec![body.leak()], vec![200]);
+        let provider = CodexProvider::with_default(Box::new(transport));
+        let snap = provider.fetch(&creds()).expect("snapshot");
+        assert_eq!(snap.five_hour.window_seconds, 6 * 3600);
+        assert_eq!(snap.weekly.window_seconds, WEEKLY_SECONDS);
+    }
+
+    #[test]
+    fn rejects_primary_duration_below_role_bound() {
+        // 30 minutes is below the 1-hour primary bound.
+        let body = body_5h(10.0, 30 * 60, 1000);
         let transport = FakeTransport::new(vec![body.leak()], vec![200]);
         let provider = CodexProvider::with_default(Box::new(transport));
         let err = provider.fetch(&creds()).expect_err("must fail");
@@ -497,7 +511,25 @@ mod tests {
             err,
             AppError::WindowDurationMismatch {
                 kind: WindowKind::FiveHour,
-                actual_seconds: 3600
+                actual_seconds: 1800,
+                expected_seconds: 18_000,
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_primary_duration_above_role_bound() {
+        // 36 hours is above the 24-hour primary bound.
+        let body = body_5h(10.0, 36 * 3600, 36 * 3600 - 60);
+        let transport = FakeTransport::new(vec![body.leak()], vec![200]);
+        let provider = CodexProvider::with_default(Box::new(transport));
+        let err = provider.fetch(&creds()).expect_err("must fail");
+        assert!(matches!(
+            err,
+            AppError::WindowDurationMismatch {
+                kind: WindowKind::FiveHour,
+                actual_seconds: 129_600,
+                expected_seconds: 18_000,
             }
         ));
     }

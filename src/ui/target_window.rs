@@ -20,7 +20,7 @@ use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsZoomed};
+use windows::Win32::UI::WindowsAndMessaging::IsIconic;
 
 use super::native;
 
@@ -47,7 +47,8 @@ pub struct TargetDiagnostics {
 /// Populated conservatively so the MVP does not accidentally attach to
 /// random WebKit/Electron renderers named `app.exe`. Operators may extend
 /// this list through the `CODEXPLUS_TARGET_BIN` environment variable.
-fn target_exe_allowlist() -> Vec<String> {
+/// Effective executable-basename allowlist, including any user override.
+pub fn target_executable_allowlist() -> Vec<String> {
     fn canonicalise(value: &str) -> String {
         value
             .trim()
@@ -172,13 +173,14 @@ pub fn is_codex_desktop(candidate: &WindowIdentity) -> bool {
         .trim_end_matches(".exe")
         .trim_end_matches(".EXE")
         .to_ascii_lowercase();
-    target_exe_allowlist()
+    target_executable_allowlist()
         .iter()
         .any(|allowed| allowed == &stripped)
 }
 
-/// Is the target window currently visible, not minimised, and *not*
-/// zoomed (maximised) or full-screen?
+/// Is the target window currently visible, restored or maximised, and has
+/// a usable window rectangle? Full-screen/borderless windows are handled by
+/// title-bar placement geometry rather than being rejected pre-emptively.
 pub fn is_target_displayable(hwnd: windows::Win32::Foundation::HWND) -> bool {
     if hwnd.is_invalid() {
         return false;
@@ -188,9 +190,6 @@ pub fn is_target_displayable(hwnd: windows::Win32::Foundation::HWND) -> bool {
     }
     unsafe {
         if IsIconic(hwnd).as_bool() {
-            return false;
-        }
-        if IsZoomed(hwnd).as_bool() {
             return false;
         }
     }
@@ -214,6 +213,11 @@ pub fn foreground_codex_window() -> Option<WindowIdentity> {
             let (_, fg_pid) = native::window_thread_process_id(native::foreground_window());
             candidates.into_iter().find(|id| id.pid == fg_pid)
         })
+}
+
+/// Inspect the current foreground root window without applying the Codex allowlist.
+pub fn foreground_window_identity() -> Option<WindowIdentity> {
+    inspect_window(native::root_owner(native::foreground_window()))
 }
 
 pub fn collect_codex_candidates() -> Vec<WindowIdentity> {
@@ -250,7 +254,7 @@ mod tests {
 
     #[test]
     fn allowlist_matches_codex_basenames() {
-        let mut list = target_exe_allowlist();
+        let mut list = target_executable_allowlist();
         // ensure no duplicates from env misuse
         list.sort();
         list.dedup();

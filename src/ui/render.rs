@@ -48,8 +48,15 @@ impl Tone {
 pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
     let tone = Tone::from_state(state);
     let Some(snap) = state.cached() else {
+        let text = match state {
+            ViewState::Loading { .. } => "Codex usage · loading…",
+            ViewState::Error { .. } => "Codex usage · unavailable",
+            ViewState::Ready { .. } | ViewState::Stale { .. } => {
+                unreachable!("state has a snapshot")
+            }
+        };
         return RenderedRow {
-            text: "Codex usage: --".into(),
+            text: text.into(),
             tone,
         };
     };
@@ -57,13 +64,17 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
     let week_used = format_used_percent(&snap.weekly);
     let five_cd = format_countdown_compact(&snap.five_hour, now_unix);
     let week_cd = format_countdown_compact(&snap.weekly, now_unix);
+    let five_label = snap.five_hour.display_label();
+    let week_label = snap.weekly.display_label();
     let stale = if state.stale_marker() {
         " !".to_string()
     } else {
         String::new()
     };
     RenderedRow {
-        text: format!("5h {five_used} {five_cd}   week {week_used} {week_cd}{stale}"),
+        text: format!(
+            "{five_label} {five_used} {five_cd}   {week_label} {week_used} {week_cd}{stale}"
+        ),
         tone,
     }
 }
@@ -122,6 +133,23 @@ mod tests {
             reason: "network",
         };
         assert_eq!(Tone::from_state(&s), Tone::Stale);
+    }
+
+    #[test]
+    fn no_snapshot_states_render_status_placeholders() {
+        let loading = build_text(&ViewState::Loading { cached: None }, UsageSnapshot::now());
+        assert_eq!(loading.text, "Codex usage · loading…");
+        assert_eq!(loading.tone, Tone::Stale);
+
+        let unavailable = build_text(
+            &ViewState::Error {
+                cached: None,
+                reason: "network",
+            },
+            UsageSnapshot::now(),
+        );
+        assert_eq!(unavailable.text, "Codex usage · unavailable");
+        assert_eq!(unavailable.tone, Tone::Stale);
     }
 
     #[test]

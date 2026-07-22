@@ -28,6 +28,7 @@ use crate::provider::{
 };
 use crate::settings;
 use crate::storage;
+use crate::ui::target_window;
 
 const LOG_PREFIX: &str = "codexplus-diagnose";
 
@@ -47,6 +48,7 @@ pub fn run() -> i32 {
         report_cache_write(&mut report, snapshot);
     }
     report_state(&mut report, outcome.as_ref());
+    report_target_window(&mut report);
 
     let write_result = write_log(&log_path, &report);
     match write_result {
@@ -166,7 +168,7 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
         Err(err) => {
             writeln!(report, "  Proxy mode    : invalid configuration").ok();
             writeln!(report, "  HTTP response : <error>").ok();
-            writeln!(report, "  Detail        : {}", err.public_message()).ok();
+            writeln!(report, "  Detail        : {}", err.diagnostic_detail()).ok();
             writeln!(report, "  Retry class   : {:?}", err.retry_class()).ok();
             return None;
         }
@@ -181,7 +183,7 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
         Ok(transport) => transport,
         Err(err) => {
             writeln!(report, "  HTTP response : <error>").ok();
-            writeln!(report, "  Detail        : {}", err.public_message()).ok();
+            writeln!(report, "  Detail        : {}", err.diagnostic_detail()).ok();
             writeln!(report, "  Retry class   : {:?}", err.retry_class()).ok();
             return None;
         }
@@ -201,25 +203,37 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
             .ok();
             writeln!(
                 report,
-                "  5h used       : {:.2}%",
+                "  5h used          : {:.2}%",
                 snapshot.five_hour.used_percent
             )
             .ok();
             writeln!(
                 report,
-                "  weekly used   : {:.2}%",
+                "  5h duration      : {} seconds",
+                snapshot.five_hour.window_seconds
+            )
+            .ok();
+            writeln!(
+                report,
+                "  weekly used      : {:.2}%",
                 snapshot.weekly.used_percent
             )
             .ok();
             writeln!(
                 report,
-                "  5h resets_at  : {}",
+                "  weekly duration  : {} seconds",
+                snapshot.weekly.window_seconds
+            )
+            .ok();
+            writeln!(
+                report,
+                "  5h resets_at     : {}",
                 snapshot.five_hour.resets_at_unix
             )
             .ok();
             writeln!(
                 report,
-                "  weekly resets_at: {}",
+                "  weekly resets_at : {}",
                 snapshot.weekly.resets_at_unix
             )
             .ok();
@@ -227,7 +241,7 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
         }
         Err(err) => {
             writeln!(report, "  HTTP response : <error>").ok();
-            writeln!(report, "  Detail        : {}", err.public_message()).ok();
+            writeln!(report, "  Detail        : {}", err.diagnostic_detail()).ok();
             writeln!(report, "  Retry class   : {:?}", err.retry_class()).ok();
             None
         }
@@ -277,6 +291,41 @@ fn report_state(report: &mut String, snapshot: Option<&crate::model::UsageSnapsh
         },
     };
     writeln!(report, "  {}", formatting::format_tray_tooltip(&state, now)).ok();
+}
+
+fn report_target_window(report: &mut String) {
+    writeln!(report).ok();
+    writeln!(report, "6. Overlay target detection").ok();
+    writeln!(report, "---------------------------").ok();
+    let allowlist = target_window::target_executable_allowlist();
+    writeln!(report, "  Allowed basenames : {}", allowlist.join(", ")).ok();
+
+    match target_window::foreground_window_identity() {
+        Some(window) => {
+            writeln!(report, "  Foreground exe   : {}", window.exe_basename).ok();
+            writeln!(report, "  Foreground class : {}", window.class_name).ok();
+        }
+        None => {
+            writeln!(report, "  Foreground window: <unavailable>").ok();
+        }
+    }
+
+    match target_window::foreground_codex_window() {
+        Some(target) => {
+            let hwnd = windows::Win32::Foundation::HWND(target.hwnd as *mut _);
+            writeln!(report, "  Target matched   : yes ({})", target.exe_basename).ok();
+            writeln!(
+                report,
+                "  Target eligible  : {}",
+                target_window::is_target_displayable(hwnd)
+            )
+            .ok();
+        }
+        None => {
+            writeln!(report, "  Target matched   : no").ok();
+            writeln!(report, "  Target eligible  : no").ok();
+        }
+    }
 }
 
 fn show_summary(log_path: &Path, status: &str) {

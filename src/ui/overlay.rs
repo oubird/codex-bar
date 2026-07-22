@@ -268,13 +268,12 @@ pub fn target_overlay_rect(target: HWND) -> Option<RECT> {
 }
 
 pub fn is_target_displayable(target: HWND) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsZoomed};
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
     if target.is_invalid() || !native::is_window_visible(target) {
         return false;
     }
     unsafe {
         !IsIconic(target).as_bool()
-            && !IsZoomed(target).as_bool()
             && native::window_rect(target)
                 .is_some_and(|rect| rect.right > rect.left && rect.bottom > rect.top)
     }

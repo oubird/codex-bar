@@ -11,8 +11,8 @@
 
 ## 功能
 
-- **标题栏 overlay**：当前台窗口被识别为 Codex 时，在标题栏右侧显示 `5h 42% · 1h18m   week 67% · 3d4h`。
-- **自动隐藏**：窗口不在前台、最小化、最大化、不可见或标题栏空间不足时隐藏；overlay 鼠标穿透，不抢焦点、不出现在任务栏或 Alt+Tab。
+- **标题栏 overlay**：当前台窗口被识别为 Codex 时，在标题栏右侧显示 `5h 42% · 1h18m   week 67% · 3d4h`；服务端返回的窗口时长如果仍在合理角色范围内，会按实际值显示（例如 `primary 6h 12% · 6h   secondary 8d 30% · 8d`）。尚无可用数据时仍显示状态条，而不是静默消失。
+- **自动隐藏**：窗口不在前台、最小化、不可见或标题栏空间不足时隐藏；最大化窗口也支持显示。overlay 鼠标穿透，不抢焦点、不出现在任务栏或 Alt+Tab。
 - **托盘常驻**：启动后保留通知区域图标。右键菜单提供 Refresh now、Show title-bar overlay、Settings、Run diagnose 和 Exit。
 - **后台刷新与缓存**：默认每 300 秒请求一次；网络或协议异常时保留最近成功快照并标记为 stale，认证问题会降低刷新频率。
 - **设置窗口**：可开关 overlay、设置 60–3600 秒刷新周期，以及选择环境代理、强制直连或自定义代理。
@@ -83,7 +83,7 @@ $env:CODEXPLUS_HTTPS_PROXY = 'http://127.0.0.1:7890'
 | 已用 ≥ 70% | 橙色 |
 | 已用 ≥ 90% | 红色 |
 | stale | 灰色并带 `!`，继续显示 last-good 数值 |
-| 无实时数据且无缓存 | 不显示伪造数值 |
+| 无实时数据且无缓存 | 显示灰色状态条 `Codex usage · unavailable`；这不是伪造额度值 |
 
 ## 目标窗口识别
 
@@ -94,7 +94,7 @@ $env:CODEXPLUS_TARGET_BIN = 'codex.exe,chatgpt.exe'
 .\target\release\codexplus.exe
 ```
 
-这项覆盖只影响当前启动进程。不同安装包、窗口类、主题或无边框全屏模式可能影响标题栏定位；如未匹配，可先通过该变量确认实际 host 名称。
+这项覆盖只影响当前启动进程。状态条仅会附着到前台的目标窗口；关闭 overlay、最小化、不可见、窗口尺寸无效或标题栏可用宽度不足时会隐藏。最大化窗口可以显示。不同安装包、窗口类、主题或无边框全屏模式仍可能影响标题栏定位；如未匹配，请先运行诊断，确认前台窗口的实际 exe basename 后再设置该变量。
 
 ## 诊断
 
@@ -106,7 +106,7 @@ $env:CODEXPLUS_TARGET_BIN = 'codex.exe,chatgpt.exe'
 
 诊断使用与当前 Settings 相同的代理模式，成功的实时请求会更新 last-good 缓存，并将报告写入 `%TEMP%\codexplus-diagnose-*.log`。结束后会显示报告路径。
 
-报告会记录凭据文件存在性、缓存读取结果、代理**来源标签**、请求结果和 ViewState 摘要；不会记录 token、账号 ID、Authorization header、代理地址、代理用户名/密码、响应 body 或 API 原文。
+报告会记录凭据文件存在性、缓存读取结果、代理**来源标签**、请求结果、ViewState 摘要，以及 overlay 目标识别结果（有效 exe basename、前台窗口 exe/class、是否匹配并具备显示资格）。请求成功时会记录两个窗口的实际 `limit_window_seconds`；协议错误（例如 `WindowDurationMismatch`）会同时记录窗口角色、actual/expected duration 与允许范围，便于判断当前 CodexPlus 是否还应接受该响应。排查“没有状态条”时，请先把 Codex 窗口置于前台再运行诊断。报告不会记录 token、账号 ID、Authorization header、代理地址、代理用户名/密码、响应 body、API 原文、窗口标题或完整进程路径。
 
 ## 构建与验证
 

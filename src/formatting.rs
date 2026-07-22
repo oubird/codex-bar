@@ -70,12 +70,14 @@ pub fn format_overlay_row(state: &ViewState, now_unix: i64) -> String {
     let Some(snapshot) = state.cached() else {
         return "--".to_string();
     };
+    let five_label = snapshot.five_hour.display_label();
+    let week_label = snapshot.weekly.display_label();
     let five = format_used_percent(&snapshot.five_hour);
     let week = format_used_percent(&snapshot.weekly);
     let five_cd = format_countdown_compact(&snapshot.five_hour, now_unix);
     let week_cd = format_countdown_compact(&snapshot.weekly, now_unix);
     let stale = if state.stale_marker() { "!" } else { "" };
-    format!("5h {five} {five_cd}  week {week} {week_cd}{stale}")
+    format!("{five_label} {five} {five_cd}  {week_label} {week} {week_cd}{stale}")
 }
 
 /// Tooltip-style multi-line string for the tray.
@@ -87,13 +89,13 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             lines.push("Loading Codex usage...".to_string());
         }
         ViewState::Ready { snapshot } => {
-            lines.push(usage_line("5 hour", &snapshot.five_hour, now_unix));
-            lines.push(usage_line("Weekly", &snapshot.weekly, now_unix));
+            lines.push(usage_line(&snapshot.five_hour, now_unix));
+            lines.push(usage_line(&snapshot.weekly, now_unix));
             lines.push(format!("Updated {}", format_clock(now_unix)));
         }
         ViewState::Stale { snapshot, reason } => {
-            lines.push(usage_line("5 hour", &snapshot.five_hour, now_unix));
-            lines.push(usage_line("Weekly", &snapshot.weekly, now_unix));
+            lines.push(usage_line(&snapshot.five_hour, now_unix));
+            lines.push(usage_line(&snapshot.weekly, now_unix));
             lines.push(format!(
                 "Stale ({reason}) — updated {}",
                 format_clock(now_unix)
@@ -103,8 +105,8 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             cached: Some(snapshot),
             reason,
         } => {
-            lines.push(usage_line("5 hour", &snapshot.five_hour, now_unix));
-            lines.push(usage_line("Weekly", &snapshot.weekly, now_unix));
+            lines.push(usage_line(&snapshot.five_hour, now_unix));
+            lines.push(usage_line(&snapshot.weekly, now_unix));
             lines.push(format!(
                 "Error ({reason}) — updated {}",
                 format_clock(now_unix)
@@ -121,7 +123,8 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
     truncate_utf16(&tooltip, 511)
 }
 
-fn usage_line(label: &str, window: &RateWindow, now_unix: i64) -> String {
+fn usage_line(window: &RateWindow, now_unix: i64) -> String {
+    let label = window.display_label();
     let used = format_used_percent(window);
     let countdown = format_countdown_compact(window, now_unix);
     format!("{label}: {used}, reset in {countdown}")
