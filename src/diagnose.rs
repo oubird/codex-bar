@@ -21,11 +21,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::credentials::{credential_signature, read_credentials, resolve_auth_path};
+use crate::formatting;
 use crate::model::ViewState;
 use crate::provider::{
     CodexProvider, ProxyConfiguration, ProxySource, UreqTransport, UsageProvider,
 };
-use crate::formatting;
+use crate::settings;
 use crate::storage;
 
 const LOG_PREFIX: &str = "codexplus-diagnose";
@@ -35,12 +36,7 @@ pub fn run() -> i32 {
     let mut report = String::new();
     writeln!(report, "CodexPlus diagnose report").ok();
     writeln!(report, "========================").ok();
-    writeln!(
-        report,
-        "Generated: {}",
-        crate::model::UsageSnapshot::now()
-    )
-    .ok();
+    writeln!(report, "Generated: {}", crate::model::UsageSnapshot::now()).ok();
     writeln!(report, "Log file:  {}", log_path.display()).ok();
     writeln!(report).ok();
 
@@ -58,11 +54,6 @@ pub fn run() -> i32 {
         Err(err) => show_summary(&log_path, &format!("failed to write log: {err}")),
     }
     0
-}
-
-fn write_line(buf: &mut String, line: &str) {
-    buf.push_str(line);
-    buf.push('\n');
 }
 
 fn log_path() -> PathBuf {
@@ -93,7 +84,7 @@ fn report_auth(report: &mut String) {
                 writeln!(report, "  Modified (u)  : <unknown>").ok();
             }
             match read_credentials(&path) {
-                Ok(creds) => {
+                Ok(_) => {
                     writeln!(report, "  JSON parsed   : yes").ok();
                     // Do not reveal a token, its length, account ID, or
                     // even an account-presence bit in the diagnostic file.
@@ -169,7 +160,8 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
             return None;
         }
     };
-    let proxy_configuration = match ProxyConfiguration::from_environment() {
+    let proxy_configuration = match ProxyConfiguration::from_policy(settings::load().proxy_policy())
+    {
         Ok(configuration) => configuration,
         Err(err) => {
             writeln!(report, "  Proxy mode    : invalid configuration").ok();
@@ -200,7 +192,11 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
             writeln!(
                 report,
                 "  HTTP response : 200 (parsed {})",
-                if snapshot.is_sane() { "OK" } else { "but insane!" }
+                if snapshot.is_sane() {
+                    "OK"
+                } else {
+                    "but insane!"
+                }
             )
             .ok();
             writeln!(
@@ -215,8 +211,18 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
                 snapshot.weekly.used_percent
             )
             .ok();
-            writeln!(report, "  5h resets_at  : {}", snapshot.five_hour.resets_at_unix).ok();
-            writeln!(report, "  weekly resets_at: {}", snapshot.weekly.resets_at_unix).ok();
+            writeln!(
+                report,
+                "  5h resets_at  : {}",
+                snapshot.five_hour.resets_at_unix
+            )
+            .ok();
+            writeln!(
+                report,
+                "  weekly resets_at: {}",
+                snapshot.weekly.resets_at_unix
+            )
+            .ok();
             Some(snapshot)
         }
         Err(err) => {
@@ -256,7 +262,9 @@ fn report_state(report: &mut String, snapshot: Option<&crate::model::UsageSnapsh
     writeln!(report, "-------------------").ok();
     let now = crate::model::UsageSnapshot::now();
     let state = match snapshot {
-        Some(snap) => ViewState::Ready { snapshot: snap.clone() },
+        Some(snap) => ViewState::Ready {
+            snapshot: snap.clone(),
+        },
         None => match storage::load() {
             Some(snap) => ViewState::Stale {
                 snapshot: snap,
@@ -274,9 +282,7 @@ fn report_state(report: &mut String, snapshot: Option<&crate::model::UsageSnapsh
 fn show_summary(log_path: &Path, status: &str) {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, MB_ICONINFORMATION, MB_OK,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
     let message = format!(
         "CodexPlus diagnose finished.\n\nStatus: {status}\nLog: {}",

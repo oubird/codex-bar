@@ -57,7 +57,11 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
     let week_used = format_used_percent(&snap.weekly);
     let five_cd = format_countdown_compact(&snap.five_hour, now_unix);
     let week_cd = format_countdown_compact(&snap.weekly, now_unix);
-    let stale = if state.stale_marker() { " !".to_string() } else { String::new() };
+    let stale = if state.stale_marker() {
+        " !".to_string()
+    } else {
+        String::new()
+    };
     RenderedRow {
         text: format!("5h {five_used} {five_cd}   week {week_used} {week_cd}{stale}"),
         tone,
@@ -67,7 +71,9 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS};
+    use crate::model::{
+        RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS,
+    };
 
     fn snap(five: f64, week: f64) -> UsageSnapshot {
         UsageSnapshot {
@@ -90,15 +96,21 @@ mod tests {
     #[test]
     fn tone_classifies_by_max_used() {
         assert_eq!(
-            Tone::from_state(&ViewState::Ready { snapshot: snap(40.0, 30.0) }),
+            Tone::from_state(&ViewState::Ready {
+                snapshot: snap(40.0, 30.0)
+            }),
             Tone::Ok
         );
         assert_eq!(
-            Tone::from_state(&ViewState::Ready { snapshot: snap(80.0, 20.0) }),
+            Tone::from_state(&ViewState::Ready {
+                snapshot: snap(80.0, 20.0)
+            }),
             Tone::Warn
         );
         assert_eq!(
-            Tone::from_state(&ViewState::Ready { snapshot: snap(95.0, 20.0) }),
+            Tone::from_state(&ViewState::Ready {
+                snapshot: snap(95.0, 20.0)
+            }),
             Tone::Critical
         );
     }

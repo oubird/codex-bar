@@ -18,12 +18,15 @@ pub enum AppError {
     // Wire problems.
     Unauthorized,
     Forbidden,
-    RateLimited { retry_after_secs: Option<u64> },
+    RateLimited {
+        retry_after_secs: Option<u64>,
+    },
     /// Connection/transport failure. Deliberately stores no library detail:
     /// proxy transport errors can embed a proxy URL or credentials.
     Network,
     /// A configured proxy URL could not be parsed safely.
     ProxyConfigurationInvalid,
+    CustomProxyUnavailable,
     Timeout,
     HttpStatus(u16),
     RedirectRejected,
@@ -60,9 +63,10 @@ impl AppError {
             | AppError::AuthPathUnset => RetryClass::AuthFailure,
 
             AppError::RateLimited { .. } => RetryClass::RateLimited,
-            AppError::Timeout | AppError::Network | AppError::ProxyConfigurationInvalid => {
-                RetryClass::Network
-            },
+            AppError::Timeout
+            | AppError::Network
+            | AppError::ProxyConfigurationInvalid
+            | AppError::CustomProxyUnavailable => RetryClass::Network,
             AppError::HttpStatus(code) if *code >= 500 => RetryClass::Network,
             AppError::HttpStatus(_) => RetryClass::NoRetry,
 
@@ -93,6 +97,7 @@ impl AppError {
             AppError::RateLimited { .. } => "Codex rate limit reached. Will retry shortly.",
             AppError::Network => "Network is unavailable.",
             AppError::ProxyConfigurationInvalid => "Configured HTTP proxy is invalid.",
+            AppError::CustomProxyUnavailable => "Configured custom proxy is unavailable.",
             AppError::Timeout => "Request timed out.",
             AppError::HttpStatus(_) => "Codex service responded with an error.",
             AppError::RedirectRejected => "Unexpected redirect from Codex service.",

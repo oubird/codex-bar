@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::credentials::{credential_signature, read_credentials, resolve_auth_path};
 use crate::error::{AppError, RetryClass};
 use crate::model::UsageSnapshot;
-use crate::provider::{CodexProvider, UsageProvider};
+use crate::provider::{CodexProvider, ProxyPolicy, UsageProvider};
 
 #[cfg(windows)]
 use crate::provider::UreqTransport;
@@ -25,10 +25,10 @@ pub struct PollSender {
 }
 
 impl PollSender {
-    pub fn request_refresh(&self) {
+    pub fn request_refresh(&self, policy: ProxyPolicy) {
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let outcome = run_poll();
+            let outcome = run_poll(policy);
             let _ = sender.send(outcome);
         });
     }
@@ -38,13 +38,16 @@ impl PollSender {
 pub fn start() -> (PollSender, mpsc::Receiver<PollOutcome>) {
     let (tx, rx) = mpsc::channel();
     let ctrl = PollSender { sender: tx };
-    ctrl.request_refresh();
     (ctrl, rx)
 }
 
 #[cfg(windows)]
-fn run_poll() -> PollOutcome {
-    let transport = match UreqTransport::new() {
+fn run_poll(policy: ProxyPolicy) -> PollOutcome {
+    let proxy = match crate::provider::ProxyConfiguration::from_policy(policy) {
+        Ok(proxy) => proxy,
+        Err(err) => return PollOutcome::Failure(err),
+    };
+    let transport = match UreqTransport::with_proxy(proxy) {
         Ok(transport) => transport,
         Err(err) => return PollOutcome::Failure(err),
     };

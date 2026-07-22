@@ -94,14 +94,26 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
         ViewState::Stale { snapshot, reason } => {
             lines.push(usage_line("5 hour", &snapshot.five_hour, now_unix));
             lines.push(usage_line("Weekly", &snapshot.weekly, now_unix));
-            lines.push(format!("Stale ({reason}) — updated {}", format_clock(now_unix)));
+            lines.push(format!(
+                "Stale ({reason}) — updated {}",
+                format_clock(now_unix)
+            ));
         }
-        ViewState::Error { cached: Some(snapshot), reason } => {
+        ViewState::Error {
+            cached: Some(snapshot),
+            reason,
+        } => {
             lines.push(usage_line("5 hour", &snapshot.five_hour, now_unix));
             lines.push(usage_line("Weekly", &snapshot.weekly, now_unix));
-            lines.push(format!("Error ({reason}) — updated {}", format_clock(now_unix)));
+            lines.push(format!(
+                "Error ({reason}) — updated {}",
+                format_clock(now_unix)
+            ));
         }
-        ViewState::Error { cached: None, reason } => {
+        ViewState::Error {
+            cached: None,
+            reason,
+        } => {
             lines.push(format!("Error: {reason}"));
         }
     }
@@ -143,7 +155,9 @@ fn truncate_utf16(value: &str, max_code_units: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS};
+    use crate::model::{
+        RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS,
+    };
 
     fn win(kind: WindowKind, used: f64, seconds: u64, resets_in: i64) -> RateWindow {
         RateWindow {
@@ -164,7 +178,12 @@ mod tests {
 
     #[test]
     fn countdown_formats_days_hours_minutes() {
-        let w = win(WindowKind::Weekly, 30.0, WEEKLY_SECONDS, 3 * ONE_DAY + 4 * ONE_HOUR);
+        let w = win(
+            WindowKind::Weekly,
+            30.0,
+            WEEKLY_SECONDS,
+            3 * ONE_DAY + 4 * ONE_HOUR,
+        );
         assert_eq!(format_countdown_compact(&w, 0), "3d4h");
     }
 
@@ -183,13 +202,26 @@ mod tests {
     #[test]
     fn overlay_row_contains_both_windows_and_stale_marker() {
         let s = snap(
-            win(WindowKind::FiveHour, 42.0, FIVE_HOUR_SECONDS, ONE_HOUR + 18 * ONE_MINUTE),
-            win(WindowKind::Weekly, 67.0, WEEKLY_SECONDS, 3 * ONE_DAY + 4 * ONE_HOUR),
+            win(
+                WindowKind::FiveHour,
+                42.0,
+                FIVE_HOUR_SECONDS,
+                ONE_HOUR + 18 * ONE_MINUTE,
+            ),
+            win(
+                WindowKind::Weekly,
+                67.0,
+                WEEKLY_SECONDS,
+                3 * ONE_DAY + 4 * ONE_HOUR,
+            ),
         );
-        let row = format_overlay_row(&ViewState::Stale {
-            snapshot: s,
-            reason: "network",
-        }, 0);
+        let row = format_overlay_row(
+            &ViewState::Stale {
+                snapshot: s,
+                reason: "network",
+            },
+            0,
+        );
         assert!(row.contains("5h 42% 1h18m"));
         assert!(row.contains("week 67% 3d4h"));
         assert!(row.ends_with('!'));
@@ -203,7 +235,12 @@ mod tests {
 
     #[test]
     fn seconds_until_countdown_change_aligns_to_unit() {
-        let w = win(WindowKind::FiveHour, 50.0, FIVE_HOUR_SECONDS, 3 * ONE_HOUR + 30);
+        let w = win(
+            WindowKind::FiveHour,
+            50.0,
+            FIVE_HOUR_SECONDS,
+            3 * ONE_HOUR + 30,
+        );
         let change = seconds_until_countdown_change(&w, 3 * ONE_HOUR);
         // remaining seconds == 30, which is below ONE_MINUTE, so the next
         // change is in those 30 seconds.
@@ -213,7 +250,7 @@ mod tests {
     #[test]
     fn tooltip_truncates_without_splitting_surrogate() {
         let emoji = "🎉"; // surrogate pair in UTF-16
-        let input = std::iter::repeat(emoji).take(40).collect::<String>();
+        let input = emoji.repeat(40);
         let truncated = truncate_utf16(&input, 4);
         assert!(truncated.chars().count() <= 2);
     }

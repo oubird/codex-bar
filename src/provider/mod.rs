@@ -8,8 +8,8 @@
 mod codex;
 
 pub use codex::{
-    codex_default_endpoint, CodexProvider, ProviderTransport, ProxyConfiguration, ProxySource,
-    UreqTransport, UsageResponse,
+    codex_default_endpoint, CodexProvider, ProviderTransport, ProxyConfiguration, ProxyPolicy,
+    ProxySource, UreqTransport, UsageResponse,
 };
 
 use crate::credentials::CodexCredentials;

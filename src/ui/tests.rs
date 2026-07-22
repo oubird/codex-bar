@@ -4,9 +4,11 @@
 #![cfg(windows)]
 
 #[cfg(test)]
-mod tests {
+mod cross_module {
     use crate::formatting::{format_overlay_row, format_tray_tooltip};
-    use crate::model::{RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS};
+    use crate::model::{
+        RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS,
+    };
 
     fn snap(five: f64, week: f64, resets_in_five: i64, resets_in_week: i64) -> UsageSnapshot {
         let now = UsageSnapshot::now();
@@ -30,7 +32,10 @@ mod tests {
     #[test]
     fn overlay_row_and_tooltip_agree_on_stale_marker() {
         let s = snap(40.0, 70.0, 3600, 3 * 24 * 3600);
-        let state = ViewState::Stale { snapshot: s.clone(), reason: "network" };
+        let state = ViewState::Stale {
+            snapshot: s.clone(),
+            reason: "network",
+        };
         let now = UsageSnapshot::now();
         let row = format_overlay_row(&state, now);
         let tooltip = format_tray_tooltip(&state, now);
@@ -41,7 +46,12 @@ mod tests {
     #[test]
     fn overlay_row_compact_when_both_windows_present() {
         let s = snap(20.0, 60.0, 5400, 24 * 3600);
-        let row = format_overlay_row(&ViewState::Ready { snapshot: s.clone() }, UsageSnapshot::now());
+        let row = format_overlay_row(
+            &ViewState::Ready {
+                snapshot: s.clone(),
+            },
+            UsageSnapshot::now(),
+        );
         assert!(row.contains("5h 20%"));
         assert!(row.contains("week 60%"));
         assert!(!row.ends_with('!'));

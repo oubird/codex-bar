@@ -9,9 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
-use crate::model::{
-    RateWindow, UsageSnapshot, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS,
-};
+use crate::model::{RateWindow, UsageSnapshot, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -66,8 +64,10 @@ pub fn save_to(path: &Path, snapshot: &UsageSnapshot) -> Result<(), AppError> {
     let tmp = path.with_extension("json.tmp");
     {
         let mut file = fs::File::create(&tmp).map_err(|e| AppError::CacheIo(e.to_string()))?;
-        file.write_all(body.as_bytes()).map_err(|e| AppError::CacheIo(e.to_string()))?;
-        file.sync_all().map_err(|e| AppError::CacheIo(e.to_string()))?;
+        file.write_all(body.as_bytes())
+            .map_err(|e| AppError::CacheIo(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| AppError::CacheIo(e.to_string()))?;
     }
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);

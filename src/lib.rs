@@ -5,16 +5,17 @@
 //! formatting, storage, provider parsing) can be exercised without bringing
 //! in Win32 APIs.
 
-pub mod model;
+pub mod credentials;
 pub mod error;
 pub mod formatting;
-pub mod credentials;
+pub mod model;
 pub mod provider;
+pub mod settings;
 pub mod storage;
 
-#[cfg(windows)]
-pub mod ui;
 #[cfg(windows)]
 pub mod app;
 #[cfg(windows)]
 pub mod diagnose;
+#[cfg(windows)]
+pub mod ui;

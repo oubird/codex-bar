@@ -68,7 +68,11 @@ pub fn credential_signature(path: &Path) -> CredentialSignature {
         Ok(m) => CredentialSignature {
             exists: true,
             size: m.len(),
-            modified_unix: m.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64),
+            modified_unix: m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64),
         },
         Err(_) => CredentialSignature {
             exists: false,
@@ -98,7 +102,10 @@ fn parse_credentials(raw: &str) -> Result<CodexCredentials, AppError> {
     }
     let parsed: AuthFile = serde_json::from_str(raw).map_err(|_| AppError::AuthFileInvalid)?;
     let tokens = parsed.tokens.ok_or(AppError::AccessTokenMissing)?;
-    let token = tokens.access_token.and_then(non_empty).ok_or(AppError::AccessTokenMissing)?;
+    let token = tokens
+        .access_token
+        .and_then(non_empty)
+        .ok_or(AppError::AccessTokenMissing)?;
     let account_id = tokens.account_id.and_then(non_empty);
     Ok(CodexCredentials {
         access_token: SecretString::new(token),
@@ -138,13 +145,19 @@ mod tests {
     #[test]
     fn rejects_empty_access_token() {
         let raw = r#"{"tokens":{"access_token":""}}"#;
-        assert_eq!(parse_credentials(raw).expect_err("must reject"), AppError::AccessTokenMissing);
+        assert_eq!(
+            parse_credentials(raw).expect_err("must reject"),
+            AppError::AccessTokenMissing
+        );
     }
 
     #[test]
     fn rejects_invalid_json() {
         let raw = "not json";
-        assert_eq!(parse_credentials(raw).expect_err("must reject"), AppError::AuthFileInvalid);
+        assert_eq!(
+            parse_credentials(raw).expect_err("must reject"),
+            AppError::AuthFileInvalid
+        );
     }
 
     #[test]

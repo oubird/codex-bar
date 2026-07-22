@@ -56,7 +56,10 @@ fn target_exe_allowlist() -> Vec<String> {
             .to_ascii_lowercase()
     }
 
-    let defaults = ["codex", "codex desktop"];
+    // The Microsoft Store Codex desktop build currently hosts its top-level
+    // window in ChatGPT.exe; retain the explicit Codex names for standalone
+    // distributions and allow operators to extend this via CODEXPLUS_TARGET_BIN.
+    let defaults = ["codex", "codex desktop", "chatgpt"];
     let env = std::env::var("CODEXPLUS_TARGET_BIN")
         .ok()
         .map(|raw| {
@@ -67,11 +70,7 @@ fn target_exe_allowlist() -> Vec<String> {
         })
         .unwrap_or_default();
 
-    defaults
-        .into_iter()
-        .map(canonicalise)
-        .chain(env)
-        .collect()
+    defaults.into_iter().map(canonicalise).chain(env).collect()
 }
 
 /// Process basenames that should *never* be selected as the Codex host,
@@ -99,11 +98,10 @@ fn disallow_exe_basename(name: &str) -> bool {
 }
 
 pub fn inspect_window(hwnd: windows::Win32::Foundation::HWND) -> Option<WindowIdentity> {
-    use windows::Win32::Foundation::HWND;
     if hwnd.is_invalid() {
         return None;
     }
-    let (thread_id, pid) = native::window_thread_process_id(hwnd);
+    let (_, pid) = native::window_thread_process_id(hwnd);
     if pid == 0 {
         return None;
     }
@@ -174,7 +172,9 @@ pub fn is_codex_desktop(candidate: &WindowIdentity) -> bool {
         .trim_end_matches(".exe")
         .trim_end_matches(".EXE")
         .to_ascii_lowercase();
-    target_exe_allowlist().iter().any(|allowed| allowed == &stripped)
+    target_exe_allowlist()
+        .iter()
+        .any(|allowed| allowed == &stripped)
 }
 
 /// Is the target window currently visible, not minimised, and *not*
@@ -194,9 +194,7 @@ pub fn is_target_displayable(hwnd: windows::Win32::Foundation::HWND) -> bool {
             return false;
         }
     }
-    if native::window_rect(hwnd).map_or(true, |r| {
-        r.right - r.left <= 0 || r.bottom - r.top <= 0
-    }) {
+    if native::window_rect(hwnd).is_none_or(|r| r.right - r.left <= 0 || r.bottom - r.top <= 0) {
         return false;
     }
     true

@@ -87,8 +87,10 @@ impl UsageSnapshot {
         let now = self.fetched_at_unix;
         self.five_hour.window_seconds == FIVE_HOUR_SECONDS
             && self.weekly.window_seconds == WEEKLY_SECONDS
-            && (self.five_hour.resets_at_unix - now).abs() <= self.five_hour.window_seconds as i64 + CLOCK_SKEW_SECONDS
-            && (self.weekly.resets_at_unix - now).abs() <= self.weekly.window_seconds as i64 + CLOCK_SKEW_SECONDS
+            && (self.five_hour.resets_at_unix - now).abs()
+                <= self.five_hour.window_seconds as i64 + CLOCK_SKEW_SECONDS
+            && (self.weekly.resets_at_unix - now).abs()
+                <= self.weekly.window_seconds as i64 + CLOCK_SKEW_SECONDS
             && self.five_hour.used_percent.is_finite()
             && self.weekly.used_percent.is_finite()
             && (0.0..=100.0).contains(&self.five_hour.used_percent)
@@ -102,19 +104,27 @@ impl UsageSnapshot {
 /// overlay can render historical numbers with an explicit stale marker.
 #[derive(Debug, Clone)]
 pub enum ViewState {
-    Loading { cached: Option<UsageSnapshot> },
-    Ready { snapshot: UsageSnapshot },
-    Stale { snapshot: UsageSnapshot, reason: &'static str },
-    Error { cached: Option<UsageSnapshot>, reason: &'static str },
+    Loading {
+        cached: Option<UsageSnapshot>,
+    },
+    Ready {
+        snapshot: UsageSnapshot,
+    },
+    Stale {
+        snapshot: UsageSnapshot,
+        reason: &'static str,
+    },
+    Error {
+        cached: Option<UsageSnapshot>,
+        reason: &'static str,
+    },
 }
 
 impl ViewState {
     pub fn cached(&self) -> Option<&UsageSnapshot> {
         match self {
-            ViewState::Loading { cached }
-            | ViewState::Error { cached, .. } => cached.as_ref(),
-            ViewState::Ready { snapshot }
-            | ViewState::Stale { snapshot, .. } => Some(snapshot),
+            ViewState::Loading { cached } | ViewState::Error { cached, .. } => cached.as_ref(),
+            ViewState::Ready { snapshot } | ViewState::Stale { snapshot, .. } => Some(snapshot),
         }
     }
 
@@ -123,7 +133,14 @@ impl ViewState {
     }
 
     pub fn stale_marker(&self) -> bool {
-        matches!(self, ViewState::Stale { .. } | ViewState::Error { cached: Some(_), .. })
+        matches!(
+            self,
+            ViewState::Stale { .. }
+                | ViewState::Error {
+                    cached: Some(_),
+                    ..
+                }
+        )
     }
 }
 

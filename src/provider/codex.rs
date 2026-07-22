@@ -10,8 +10,8 @@ use std::time::Duration;
 use crate::credentials::CodexCredentials;
 use crate::error::AppError;
 use crate::model::{
-    RateWindow, UsageSnapshot, WindowKind, CLOCK_SKEW_SECONDS, FIVE_HOUR_SECONDS, MAX_WINDOW_SECONDS,
-    MIN_WINDOW_SECONDS, WEEKLY_SECONDS,
+    RateWindow, UsageSnapshot, WindowKind, CLOCK_SKEW_SECONDS, FIVE_HOUR_SECONDS,
+    MAX_WINDOW_SECONDS, MIN_WINDOW_SECONDS, WEEKLY_SECONDS,
 };
 use crate::provider::UsageProvider;
 
@@ -50,6 +50,13 @@ impl ProxySource {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyPolicy {
+    Environment,
+    Direct,
+    CustomCredential,
+}
+
 /// Validated proxy state. The raw proxy URL and `ureq::Proxy` are never
 /// exposed, formatted, cached, or persisted because either can include
 /// proxy credentials.
@@ -65,6 +72,34 @@ impl ProxyConfiguration {
 
     pub fn source(&self) -> ProxySource {
         self.source
+    }
+
+    pub fn from_policy(policy: ProxyPolicy) -> Result<Self, AppError> {
+        match policy {
+            ProxyPolicy::Environment => Self::from_environment(),
+            ProxyPolicy::Direct => Ok(Self {
+                source: ProxySource::Direct,
+                proxy: None,
+            }),
+            ProxyPolicy::CustomCredential => {
+                let url = crate::settings::load_custom_proxy_url()
+                    .map_err(|_| AppError::CustomProxyUnavailable)?
+                    .ok_or(AppError::CustomProxyUnavailable)?;
+                Self::from_custom_url(&url)
+            }
+        }
+    }
+
+    fn from_custom_url(value: &str) -> Result<Self, AppError> {
+        let parsed = url::Url::parse(value).map_err(|_| AppError::ProxyConfigurationInvalid)?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(AppError::ProxyConfigurationInvalid);
+        }
+        let proxy = ureq::Proxy::new(value).map_err(|_| AppError::ProxyConfigurationInvalid)?;
+        Ok(Self {
+            source: ProxySource::HttpProxy,
+            proxy: Some(proxy),
+        })
     }
 
     fn from_env_lookup(
@@ -89,13 +124,11 @@ impl ProxyConfiguration {
             if value.is_empty() {
                 continue;
             }
-            let parsed = url::Url::parse(value)
-                .map_err(|_| AppError::ProxyConfigurationInvalid)?;
+            let parsed = url::Url::parse(value).map_err(|_| AppError::ProxyConfigurationInvalid)?;
             if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
                 return Err(AppError::ProxyConfigurationInvalid);
             }
-            let proxy = ureq::Proxy::new(value)
-                .map_err(|_| AppError::ProxyConfigurationInvalid)?;
+            let proxy = ureq::Proxy::new(value).map_err(|_| AppError::ProxyConfigurationInvalid)?;
             return Ok(Self {
                 source,
                 proxy: Some(proxy),
@@ -143,7 +176,10 @@ pub struct CodexProvider {
 
 impl CodexProvider {
     pub fn with_transport(endpoint: &'static str, transport: Box<dyn ProviderTransport>) -> Self {
-        Self { endpoint, transport }
+        Self {
+            endpoint,
+            transport,
+        }
     }
 
     pub fn with_default(transport: Box<dyn ProviderTransport>) -> Self {
@@ -290,7 +326,10 @@ impl UreqTransport {
 #[cfg(windows)]
 impl ProviderTransport for UreqTransport {
     fn send(&self, request: ProviderRequest) -> Result<UsageResponse, AppError> {
-        let agent = self.agent.lock().map_err(|_| AppError::Internal("transport lock".into()))?;
+        let agent = self
+            .agent
+            .lock()
+            .map_err(|_| AppError::Internal("transport lock".into()))?;
         let mut builder = agent
             .get(&request.endpoint)
             .set("Authorization", &format!("Bearer {}", request.bearer_token))
@@ -315,7 +354,9 @@ impl ProviderTransport for UreqTransport {
                         .header("Retry-After")
                         .and_then(|raw| raw.parse::<u64>().ok())
                         .map(|s| s.clamp(30, 15 * 60));
-                    return Err(AppError::RateLimited { retry_after_secs: retry });
+                    return Err(AppError::RateLimited {
+                        retry_after_secs: retry,
+                    });
                 }
                 if (300..400).contains(&status) {
                     return Err(AppError::RedirectRejected);
@@ -331,18 +372,17 @@ impl ProviderTransport for UreqTransport {
                     .map_err(|_| AppError::ResponseTooLarge)?;
                 Ok(UsageResponse::from_raw(body))
             }
-            Err(ureq::Error::Status(code, _)) if code == 401 => Err(AppError::Unauthorized),
-            Err(ureq::Error::Status(code, _)) if code == 403 => Err(AppError::Forbidden),
-            Err(ureq::Error::Status(code, _)) if code == 429 => {
-                Err(AppError::RateLimited { retry_after_secs: None })
-            }
+            Err(ureq::Error::Status(401, _)) => Err(AppError::Unauthorized),
+            Err(ureq::Error::Status(403, _)) => Err(AppError::Forbidden),
+            Err(ureq::Error::Status(429, _)) => Err(AppError::RateLimited {
+                retry_after_secs: None,
+            }),
             Err(ureq::Error::Status(code, _)) if (300..400).contains(&code) => {
                 Err(AppError::RedirectRejected)
             }
             Err(ureq::Error::Status(code, _)) => Err(AppError::HttpStatus(code)),
             Err(ureq::Error::Transport(t)) => {
-                if t.kind() == ureq::ErrorKind::ConnectionFailed
-                    || t.kind() == ureq::ErrorKind::Dns
+                if t.kind() == ureq::ErrorKind::ConnectionFailed || t.kind() == ureq::ErrorKind::Dns
                 {
                     // Do not retain t.to_string(): proxy errors can include
                     // proxy addresses or credentials.
@@ -394,7 +434,9 @@ mod tests {
         match status {
             401 => AppError::Unauthorized,
             403 => AppError::Forbidden,
-            429 => AppError::RateLimited { retry_after_secs: None },
+            429 => AppError::RateLimited {
+                retry_after_secs: None,
+            },
             n if (300..400).contains(&n) => AppError::RedirectRejected,
             n => AppError::HttpStatus(n as u16),
         }
@@ -437,10 +479,8 @@ mod tests {
     #[test]
     fn successful_response_yields_snapshot() {
         let transport = FakeTransport::new(vec![valid_body().leak()], vec![200]);
-        let provider = CodexProvider::with_transport(
-            "https://example.test/wham/usage",
-            Box::new(transport),
-        );
+        let provider =
+            CodexProvider::with_transport("https://example.test/wham/usage", Box::new(transport));
         let snap = provider.fetch(&creds()).expect("snapshot");
         assert!((snap.five_hour.used_percent - 42.0).abs() < 0.001);
         assert_eq!(snap.five_hour.window_seconds, FIVE_HOUR_SECONDS);
@@ -572,6 +612,13 @@ mod tests {
     }
 
     #[test]
+    fn direct_policy_ignores_environment_proxy() {
+        let proxy = ProxyConfiguration::from_policy(ProxyPolicy::Direct).expect("direct mode");
+        assert_eq!(proxy.source(), ProxySource::Direct);
+        assert!(proxy.proxy.is_none());
+    }
+
+    #[test]
     fn invalid_proxy_never_leaks_url_or_credentials() {
         let secret = "http://alice:s3cret@proxy.example:bad-port";
         let err = match proxy_configuration_from(&[("CODEXPLUS_HTTPS_PROXY", secret)]) {
@@ -598,13 +645,25 @@ mod tests {
 
     #[test]
     fn retry_class_distinguishes_categories() {
-        assert_eq!(AppError::Unauthorized.retry_class(), crate::error::RetryClass::AuthFailure);
-        assert_eq!(AppError::Timeout.retry_class(), crate::error::RetryClass::Network);
-        assert_eq!(AppError::Network.retry_class(), crate::error::RetryClass::Network);
+        assert_eq!(
+            AppError::Unauthorized.retry_class(),
+            crate::error::RetryClass::AuthFailure
+        );
+        assert_eq!(
+            AppError::Timeout.retry_class(),
+            crate::error::RetryClass::Network
+        );
+        assert_eq!(
+            AppError::Network.retry_class(),
+            crate::error::RetryClass::Network
+        );
         assert_eq!(
             AppError::ProxyConfigurationInvalid.retry_class(),
             crate::error::RetryClass::Network
         );
-        assert_eq!(AppError::RedirectRejected.retry_class(), crate::error::RetryClass::Protocol);
+        assert_eq!(
+            AppError::RedirectRejected.retry_class(),
+            crate::error::RetryClass::Protocol
+        );
     }
 }
