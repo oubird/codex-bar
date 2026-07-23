@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use crate::error::AppError;
 use crate::model::{RateWindow, UsageSnapshot, WindowKind, FIVE_HOUR_SECONDS};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
+const LEGACY_SCHEMA_VERSION: u32 = 1;
 
 pub fn cache_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|p| p.join("CodexPlus"))
@@ -36,7 +37,10 @@ pub fn load_from(path: &Path) -> Result<Option<UsageSnapshot>, AppError> {
         Ok(c) => c,
         Err(_) => return Err(AppError::CacheInvalid),
     };
-    if parsed.schema_version != SCHEMA_VERSION {
+    if !matches!(
+        parsed.schema_version,
+        LEGACY_SCHEMA_VERSION | SCHEMA_VERSION
+    ) {
         return Err(AppError::CacheInvalid);
     }
     let snap: UsageSnapshot = parsed.snapshot.try_into()?;
@@ -87,16 +91,18 @@ struct CacheFile {
 /// [`crate::model`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CacheSnapshot {
-    five_hour: CacheWindow,
-    weekly: CacheWindow,
+    #[serde(default)]
+    five_hour: Option<CacheWindow>,
+    #[serde(default)]
+    weekly: Option<CacheWindow>,
     fetched_at_unix: i64,
 }
 
 impl From<UsageSnapshot> for CacheSnapshot {
     fn from(value: UsageSnapshot) -> Self {
         Self {
-            five_hour: value.five_hour.into(),
-            weekly: value.weekly.into(),
+            five_hour: value.five_hour.map(Into::into),
+            weekly: value.weekly.map(Into::into),
             fetched_at_unix: value.fetched_at_unix,
         }
     }
@@ -105,8 +111,14 @@ impl From<UsageSnapshot> for CacheSnapshot {
 impl TryFrom<CacheSnapshot> for UsageSnapshot {
     type Error = AppError;
     fn try_from(value: CacheSnapshot) -> Result<Self, Self::Error> {
-        let five_hour = value.five_hour.into_rate_window(WindowKind::FiveHour)?;
-        let weekly = value.weekly.into_rate_window(WindowKind::Weekly)?;
+        let five_hour = value
+            .five_hour
+            .map(|window| window.into_rate_window(WindowKind::FiveHour))
+            .transpose()?;
+        let weekly = value
+            .weekly
+            .map(|window| window.into_rate_window(WindowKind::Weekly))
+            .transpose()?;
         let snapshot = UsageSnapshot {
             five_hour,
             weekly,
@@ -168,18 +180,18 @@ mod tests {
 
     fn snap(used_five: f64, reset_five: i64) -> UsageSnapshot {
         UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: used_five,
                 window_seconds: FIVE_HOUR_SECONDS,
                 resets_at_unix: reset_five,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 10.0,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: UsageSnapshot::now() + 60 * 60 * 24 * 4,
-            },
+            }),
             fetched_at_unix: UsageSnapshot::now(),
         }
     }
@@ -191,7 +203,7 @@ mod tests {
         let snapshot = snap(30.0, UsageSnapshot::now() + 60 * 60 * 2);
         save_to(&path, &snapshot).expect("save");
         let loaded = load_from(&path).expect("ok").expect("some");
-        assert!((loaded.five_hour.used_percent - 30.0).abs() < 0.0001);
+        assert!((loaded.five_hour.as_ref().unwrap().used_percent - 30.0).abs() < 0.0001);
     }
 
     #[test]
@@ -202,7 +214,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             snapshot: CacheSnapshot::from(snap(50.0, UsageSnapshot::now() + 60)),
         };
-        cache.snapshot.five_hour.used_percent = 200.0;
+        cache.snapshot.five_hour.as_mut().unwrap().used_percent = 200.0;
         let body = serde_json::to_string(&cache).unwrap();
         std::fs::write(&path, body).unwrap();
         let err = load_from(&path).expect_err("invalid");
@@ -231,8 +243,56 @@ mod tests {
         let snapshot = snap(20.0, UsageSnapshot::now() + 100);
         save_to(&path, &snapshot).expect("save ok");
         let mut broken = snap(99.0, UsageSnapshot::now() + 100);
-        broken.five_hour.window_seconds = 60;
+        broken.five_hour.as_mut().unwrap().window_seconds = 60;
         assert_eq!(save_to(&path, &broken), Err(AppError::CacheInvalid));
+    }
+
+    #[test]
+    fn round_trips_weekly_only_snapshot() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("usage-cache.json");
+        let now = UsageSnapshot::now();
+        let snapshot = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(RateWindow {
+                kind: WindowKind::Weekly,
+                used_percent: 30.0,
+                window_seconds: WEEKLY_SECONDS,
+                resets_at_unix: now + 3 * 86_400,
+            }),
+            fetched_at_unix: now,
+        };
+        save_to(&path, &snapshot).expect("save");
+        let loaded = load_from(&path).expect("load").expect("snapshot");
+        assert!(loaded.five_hour.is_none());
+        assert_eq!(loaded.weekly.as_ref().unwrap().used_percent, 30.0);
+    }
+
+    #[test]
+    fn loads_legacy_two_window_schema() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("usage-cache.json");
+        let now = UsageSnapshot::now();
+        let body = serde_json::json!({
+            "schema_version": LEGACY_SCHEMA_VERSION,
+            "snapshot": {
+                "five_hour": {
+                    "used_percent": 20.0,
+                    "resets_at_unix": now + 3600,
+                    "window_seconds": FIVE_HOUR_SECONDS
+                },
+                "weekly": {
+                    "used_percent": 30.0,
+                    "resets_at_unix": now + 3 * 86_400,
+                    "window_seconds": WEEKLY_SECONDS
+                },
+                "fetched_at_unix": now
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+        let loaded = load_from(&path).expect("load").expect("snapshot");
+        assert!(loaded.five_hour.is_some());
+        assert!(loaded.weekly.is_some());
     }
 
     #[test]
@@ -241,24 +301,24 @@ mod tests {
         let path = dir.path().join("usage-cache.json");
         let now = UsageSnapshot::now();
         let snapshot = UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: 12.5,
                 window_seconds: 6 * 3600,
                 resets_at_unix: now + 6 * 3600,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 30.0,
                 window_seconds: 8 * 86_400,
                 resets_at_unix: now + 8 * 86_400,
-            },
+            }),
             fetched_at_unix: now,
         };
         save_to(&path, &snapshot).expect("save");
         let loaded = load_from(&path).expect("ok").expect("some");
-        assert_eq!(loaded.five_hour.window_seconds, 6 * 3600);
-        assert_eq!(loaded.weekly.window_seconds, 8 * 86_400);
+        assert_eq!(loaded.five_hour.as_ref().unwrap().window_seconds, 6 * 3600);
+        assert_eq!(loaded.weekly.as_ref().unwrap().window_seconds, 8 * 86_400);
     }
 
     #[test]
@@ -267,7 +327,7 @@ mod tests {
         let path = dir.path().join("usage-cache.json");
         let now = UsageSnapshot::now();
         let mut snapshot = snap(30.0, now + 3600);
-        snapshot.five_hour.window_seconds = 30 * 60; // below PRIMARY_WINDOW_MIN_SECONDS
+        snapshot.five_hour.as_mut().unwrap().window_seconds = 30 * 60; // below PRIMARY_WINDOW_MIN_SECONDS
         let body = serde_json::to_string(&CacheFile {
             schema_version: SCHEMA_VERSION,
             snapshot: CacheSnapshot::from(snapshot),

@@ -34,7 +34,10 @@ impl Tone {
         let Some(snap) = state.cached() else {
             return Tone::Stale;
         };
-        let worst = snap.five_hour.used_percent.max(snap.weekly.used_percent);
+        let worst = snap
+            .windows()
+            .map(|window| window.used_percent)
+            .fold(0.0_f64, f64::max);
         if worst >= 90.0 {
             Tone::Critical
         } else if worst >= 70.0 {
@@ -60,21 +63,22 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
             tone,
         };
     };
-    let five_used = format_used_percent(&snap.five_hour);
-    let week_used = format_used_percent(&snap.weekly);
-    let five_cd = format_countdown_compact(&snap.five_hour, now_unix);
-    let week_cd = format_countdown_compact(&snap.weekly, now_unix);
-    let five_label = format_window_label(&snap.five_hour);
-    let week_label = format_window_label(&snap.weekly);
-    let stale = if state.stale_marker() {
-        " !".to_string()
-    } else {
-        String::new()
-    };
+    let mut segments = snap
+        .windows()
+        .map(|window| {
+            format!(
+                "{} {} {}",
+                format_window_label(window),
+                format_used_percent(window),
+                format_countdown_compact(window, now_unix)
+            )
+        })
+        .collect::<Vec<_>>();
+    if state.stale_marker() {
+        segments.push("!".to_string());
+    }
     RenderedRow {
-        text: format!(
-            "{five_label} {five_used} {five_cd}   {week_label} {week_used} {week_cd}{stale}"
-        ),
+        text: segments.join("   "),
         tone,
     }
 }
@@ -88,18 +92,18 @@ mod tests {
 
     fn snap(five: f64, week: f64) -> UsageSnapshot {
         UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: five,
                 window_seconds: FIVE_HOUR_SECONDS,
                 resets_at_unix: UsageSnapshot::now() + 3600,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: week,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: UsageSnapshot::now() + 3 * 24 * 3600,
-            },
+            }),
             fetched_at_unix: UsageSnapshot::now(),
         }
     }
@@ -153,11 +157,29 @@ mod tests {
     }
 
     #[test]
+    fn weekly_only_row_omits_short_window() {
+        let mut snapshot = snap(42.0, 67.0);
+        snapshot.five_hour = None;
+        let row = build_text(&ViewState::Ready { snapshot }, UsageSnapshot::now());
+        assert!(row.text.contains("每周 67%"));
+        assert!(!row.text.contains("5小时"));
+    }
+
+    #[test]
     fn overlay_row_includes_both_segments() {
         let s = ViewState::Ready {
             snapshot: snap(42.0, 67.0),
         };
-        let row = build_text(&s, s.cached().unwrap().five_hour.resets_at_unix - 1800);
+        let row = build_text(
+            &s,
+            s.cached()
+                .unwrap()
+                .five_hour
+                .as_ref()
+                .unwrap()
+                .resets_at_unix
+                - 1800,
+        );
         assert!(row.text.contains("5小时 42%"));
         assert!(row.text.contains("每周 67%"));
     }

@@ -40,8 +40,8 @@ pub const CLOCK_SKEW_SECONDS: i64 = 300; // tolerate 5 minutes of drift
 pub const PRIMARY_WINDOW_MIN_SECONDS: u64 = 60 * 60; // 1 hour
 /// Inclusive upper bound (in seconds) for the *primary* codex window slot.
 pub const PRIMARY_WINDOW_MAX_SECONDS: u64 = 24 * 60 * 60; // 24 hours
-/// Inclusive lower bound (in seconds) for the *secondary* codex window slot.
-pub const SECONDARY_WINDOW_MIN_SECONDS: u64 = 24 * 60 * 60; // 24 hours
+/// Inclusive lower bound (in seconds) for the long-period codex window.
+pub const SECONDARY_WINDOW_MIN_SECONDS: u64 = 24 * 60 * 60 + 1; // over 24 hours
 /// Inclusive upper bound (in seconds) for the *secondary* codex window slot.
 pub const SECONDARY_WINDOW_MAX_SECONDS: u64 = MAX_WINDOW_SECONDS;
 
@@ -87,10 +87,9 @@ impl WindowKind {
 
 /// A normalised rate-limit window.
 ///
-/// `kind` denotes the *role* assigned by the upstream JSON layout
-/// (`primary_window` / `secondary_window`), not the duration itself.
-/// `window_seconds` is the duration reported by the server and validated
-/// against [`WindowKind::accepts_duration`].
+/// `kind` denotes the role inferred from the server-reported duration, not
+/// the upstream `primary_window` / `secondary_window` field position.
+/// `window_seconds` is validated against [`WindowKind::accepts_duration`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateWindow {
     pub kind: WindowKind,
@@ -160,11 +159,11 @@ fn format_duration_compact(seconds: u64) -> String {
     }
 }
 
-/// A pair of validated Codex usage windows.
+/// One or more validated Codex usage windows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageSnapshot {
-    pub five_hour: RateWindow,
-    pub weekly: RateWindow,
+    pub five_hour: Option<RateWindow>,
+    pub weekly: Option<RateWindow>,
     /// When we fetched the snapshot, in Unix seconds.
     pub fetched_at_unix: i64,
 }
@@ -177,36 +176,42 @@ impl UsageSnapshot {
             .unwrap_or(0)
     }
 
-    /// Both slots exist, contain valid percentages, fit their role bounds,
-    /// maintain a strictly smaller primary than secondary window, and have
-    /// reset timestamps anchored against the *actual* reported duration.
+    pub fn windows(&self) -> impl Iterator<Item = &RateWindow> {
+        self.five_hour.iter().chain(self.weekly.iter())
+    }
+
+    /// At least one slot exists, and every present window contains valid
+    /// values for its duration-derived role. When both slots exist, the short
+    /// window must remain strictly shorter than the long window.
     pub fn is_sane(&self) -> bool {
+        if self.five_hour.is_none() && self.weekly.is_none() {
+            return false;
+        }
         let now = self.fetched_at_unix;
-        let five = &self.five_hour;
-        let week = &self.weekly;
-        if five.kind != WindowKind::FiveHour || week.kind != WindowKind::Weekly {
-            return false;
+        for window in self.windows() {
+            if !window.used_percent.is_finite()
+                || !(0.0..=100.0).contains(&window.used_percent)
+                || !window.kind.accepts_duration(window.window_seconds)
+                || !reset_within_bounds(window.resets_at_unix, window.window_seconds, now)
+            {
+                return false;
+            }
         }
-        if !five.used_percent.is_finite() || !week.used_percent.is_finite() {
-            return false;
-        }
-        if !(0.0..=100.0).contains(&five.used_percent)
-            || !(0.0..=100.0).contains(&week.used_percent)
+        if self
+            .five_hour
+            .as_ref()
+            .is_some_and(|window| window.kind != WindowKind::FiveHour)
+            || self
+                .weekly
+                .as_ref()
+                .is_some_and(|window| window.kind != WindowKind::Weekly)
         {
             return false;
         }
-        if !WindowKind::FiveHour.accepts_duration(five.window_seconds)
-            || !WindowKind::Weekly.accepts_duration(week.window_seconds)
-        {
-            return false;
-        }
-        if five.window_seconds >= week.window_seconds {
-            return false;
-        }
-        if !reset_within_bounds(five.resets_at_unix, five.window_seconds, now)
-            || !reset_within_bounds(week.resets_at_unix, week.window_seconds, now)
-        {
-            return false;
+        if let (Some(five), Some(week)) = (&self.five_hour, &self.weekly) {
+            if five.window_seconds >= week.window_seconds {
+                return false;
+            }
         }
         true
     }
@@ -272,18 +277,18 @@ mod tests {
 
     fn snap_with(five: (f64, i64), week: (f64, i64)) -> UsageSnapshot {
         UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: five.0,
                 window_seconds: FIVE_HOUR_SECONDS,
                 resets_at_unix: five.1,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: week.0,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: week.1,
-            },
+            }),
             fetched_at_unix: UsageSnapshot::now(),
         }
     }
@@ -292,18 +297,18 @@ mod tests {
     fn sane_snapshot_passes_basic_validation() {
         let now = UsageSnapshot::now();
         let snap = UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: 50.0,
                 window_seconds: FIVE_HOUR_SECONDS,
                 resets_at_unix: now + 3600,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 10.0,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: now + 24 * 3600,
-            },
+            }),
             fetched_at_unix: now,
         };
         assert!(snap.is_sane());
@@ -312,26 +317,61 @@ mod tests {
     #[test]
     fn insane_snapshot_fails_when_window_does_not_match() {
         let mut snap = snap_with((50.0, 0), (10.0, 0));
-        snap.five_hour.window_seconds = 60; // below PRIMARY_WINDOW_MIN_SECONDS
+        snap.five_hour.as_mut().unwrap().window_seconds = 60; // below PRIMARY_WINDOW_MIN_SECONDS
         assert!(!snap.is_sane());
+    }
+
+    #[test]
+    fn sane_snapshot_accepts_each_window_independently() {
+        let now = UsageSnapshot::now();
+        let short_only = UsageSnapshot {
+            five_hour: Some(RateWindow {
+                kind: WindowKind::FiveHour,
+                used_percent: 25.0,
+                window_seconds: FIVE_HOUR_SECONDS,
+                resets_at_unix: now + 3600,
+            }),
+            weekly: None,
+            fetched_at_unix: now,
+        };
+        assert!(short_only.is_sane());
+
+        let weekly_only = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(RateWindow {
+                kind: WindowKind::Weekly,
+                used_percent: 40.0,
+                window_seconds: WEEKLY_SECONDS,
+                resets_at_unix: now + 3 * 86_400,
+            }),
+            fetched_at_unix: now,
+        };
+        assert!(weekly_only.is_sane());
+
+        let empty = UsageSnapshot {
+            five_hour: None,
+            weekly: None,
+            fetched_at_unix: now,
+        };
+        assert!(!empty.is_sane());
     }
 
     #[test]
     fn sane_snapshot_accepts_dynamic_durations() {
         let now = UsageSnapshot::now();
         let snap = UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: 25.0,
                 window_seconds: 6 * 3600,
                 resets_at_unix: now + 6 * 3600,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 40.0,
                 window_seconds: 8 * 86_400,
                 resets_at_unix: now + 8 * 86_400,
-            },
+            }),
             fetched_at_unix: now,
         };
         assert!(snap.is_sane());
@@ -341,18 +381,18 @@ mod tests {
     fn insane_snapshot_rejects_inverted_durations() {
         let now = UsageSnapshot::now();
         let snap = UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: 25.0,
                 window_seconds: 9 * 86_400,
                 resets_at_unix: now + 9 * 86_400,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 40.0,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: now + WEEKLY_SECONDS as i64,
-            },
+            }),
             fetched_at_unix: now,
         };
         assert!(!snap.is_sane());
@@ -362,18 +402,18 @@ mod tests {
     fn insane_snapshot_rejects_reset_beyond_actual_duration() {
         let now = UsageSnapshot::now();
         let snap = UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: 25.0,
                 window_seconds: 6 * 3600,
                 resets_at_unix: now + 24 * 3600,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 40.0,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: now + WEEKLY_SECONDS as i64,
-            },
+            }),
             fetched_at_unix: now,
         };
         assert!(!snap.is_sane());

@@ -120,18 +120,7 @@ fn report_cache_load(report: &mut String) {
                         snapshot.fetched_at_unix
                     )
                     .ok();
-                    writeln!(
-                        report,
-                        "  5h used       : {:.2}%",
-                        snapshot.five_hour.used_percent
-                    )
-                    .ok();
-                    writeln!(
-                        report,
-                        "  weekly used   : {:.2}%",
-                        snapshot.weekly.used_percent
-                    )
-                    .ok();
+                    report_snapshot_windows(report, &snapshot, "  ");
                 }
                 None => {
                     writeln!(report, "  Loaded        : <no cache file>").ok();
@@ -201,42 +190,7 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
                 }
             )
             .ok();
-            writeln!(
-                report,
-                "  5h used          : {:.2}%",
-                snapshot.five_hour.used_percent
-            )
-            .ok();
-            writeln!(
-                report,
-                "  5h duration      : {} seconds",
-                snapshot.five_hour.window_seconds
-            )
-            .ok();
-            writeln!(
-                report,
-                "  weekly used      : {:.2}%",
-                snapshot.weekly.used_percent
-            )
-            .ok();
-            writeln!(
-                report,
-                "  weekly duration  : {} seconds",
-                snapshot.weekly.window_seconds
-            )
-            .ok();
-            writeln!(
-                report,
-                "  5h resets_at     : {}",
-                snapshot.five_hour.resets_at_unix
-            )
-            .ok();
-            writeln!(
-                report,
-                "  weekly resets_at : {}",
-                snapshot.weekly.resets_at_unix
-            )
-            .ok();
+            report_snapshot_windows(report, &snapshot, "  ");
             Some(snapshot)
         }
         Err(err) => {
@@ -245,6 +199,43 @@ fn report_live_request(report: &mut String) -> Option<crate::model::UsageSnapsho
             writeln!(report, "  Retry class   : {:?}", err.retry_class()).ok();
             None
         }
+    }
+}
+
+fn report_snapshot_windows(
+    report: &mut String,
+    snapshot: &crate::model::UsageSnapshot,
+    prefix: &str,
+) {
+    if let Some(window) = snapshot.five_hour.as_ref() {
+        writeln!(
+            report,
+            "{prefix}5h used       : {:.2}%",
+            window.used_percent
+        )
+        .ok();
+        writeln!(
+            report,
+            "{prefix}5h duration   : {} seconds",
+            window.window_seconds
+        )
+        .ok();
+        writeln!(report, "{prefix}5h resets_at  : {}", window.resets_at_unix).ok();
+    }
+    if let Some(window) = snapshot.weekly.as_ref() {
+        writeln!(
+            report,
+            "{prefix}weekly used   : {:.2}%",
+            window.used_percent
+        )
+        .ok();
+        writeln!(
+            report,
+            "{prefix}weekly duration: {} seconds",
+            window.window_seconds
+        )
+        .ok();
+        writeln!(report, "{prefix}weekly resets : {}", window.resets_at_unix).ok();
     }
 }
 

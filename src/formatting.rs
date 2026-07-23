@@ -115,14 +115,21 @@ pub fn format_overlay_row(state: &ViewState, now_unix: i64) -> String {
     let Some(snapshot) = state.cached() else {
         return "--".to_string();
     };
-    let five_label = format_window_label(&snapshot.five_hour);
-    let week_label = format_window_label(&snapshot.weekly);
-    let five = format_used_percent(&snapshot.five_hour);
-    let week = format_used_percent(&snapshot.weekly);
-    let five_cd = format_countdown_compact(&snapshot.five_hour, now_unix);
-    let week_cd = format_countdown_compact(&snapshot.weekly, now_unix);
-    let stale = if state.stale_marker() { "!" } else { "" };
-    format!("{five_label} {five} {five_cd}  {week_label} {week} {week_cd}{stale}")
+    let mut segments = snapshot
+        .windows()
+        .map(|window| {
+            format!(
+                "{} {} {}",
+                format_window_label(window),
+                format_used_percent(window),
+                format_countdown_compact(window, now_unix)
+            )
+        })
+        .collect::<Vec<_>>();
+    if state.stale_marker() {
+        segments.push("!".to_string());
+    }
+    segments.join("  ")
 }
 
 /// Tooltip-style multi-line string for the tray.
@@ -134,13 +141,19 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             lines.push("正在加载 Codex 用量…".to_string());
         }
         ViewState::Ready { snapshot } => {
-            lines.push(usage_line_zh(&snapshot.five_hour, now_unix));
-            lines.push(usage_line_zh(&snapshot.weekly, now_unix));
+            lines.extend(
+                snapshot
+                    .windows()
+                    .map(|window| usage_line_zh(window, now_unix)),
+            );
             lines.push(format!("更新于 {}", format_clock(now_unix)));
         }
         ViewState::Stale { snapshot, reason } => {
-            lines.push(usage_line_zh(&snapshot.five_hour, now_unix));
-            lines.push(usage_line_zh(&snapshot.weekly, now_unix));
+            lines.extend(
+                snapshot
+                    .windows()
+                    .map(|window| usage_line_zh(window, now_unix)),
+            );
             lines.push(format!(
                 "数据已过期（{}）— 更新于 {}",
                 localize_reason(reason),
@@ -151,8 +164,11 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             cached: Some(snapshot),
             reason,
         } => {
-            lines.push(usage_line_zh(&snapshot.five_hour, now_unix));
-            lines.push(usage_line_zh(&snapshot.weekly, now_unix));
+            lines.extend(
+                snapshot
+                    .windows()
+                    .map(|window| usage_line_zh(window, now_unix)),
+            );
             lines.push(format!(
                 "发生错误（{}）— 更新于 {}",
                 localize_reason(reason),
@@ -177,13 +193,19 @@ pub fn format_diagnostic_summary(state: &ViewState, now_unix: i64) -> String {
     match state {
         ViewState::Loading { .. } => lines.push("Loading Codex usage...".to_string()),
         ViewState::Ready { snapshot } => {
-            lines.push(usage_line_en(&snapshot.five_hour, now_unix));
-            lines.push(usage_line_en(&snapshot.weekly, now_unix));
+            lines.extend(
+                snapshot
+                    .windows()
+                    .map(|window| usage_line_en(window, now_unix)),
+            );
             lines.push(format!("Updated {}", format_clock(now_unix)));
         }
         ViewState::Stale { snapshot, reason } => {
-            lines.push(usage_line_en(&snapshot.five_hour, now_unix));
-            lines.push(usage_line_en(&snapshot.weekly, now_unix));
+            lines.extend(
+                snapshot
+                    .windows()
+                    .map(|window| usage_line_en(window, now_unix)),
+            );
             lines.push(format!(
                 "Stale ({reason}) — updated {}",
                 format_clock(now_unix)
@@ -193,8 +215,11 @@ pub fn format_diagnostic_summary(state: &ViewState, now_unix: i64) -> String {
             cached: Some(snapshot),
             reason,
         } => {
-            lines.push(usage_line_en(&snapshot.five_hour, now_unix));
-            lines.push(usage_line_en(&snapshot.weekly, now_unix));
+            lines.extend(
+                snapshot
+                    .windows()
+                    .map(|window| usage_line_en(window, now_unix)),
+            );
             lines.push(format!(
                 "Error ({reason}) — updated {}",
                 format_clock(now_unix)
@@ -304,8 +329,8 @@ mod tests {
 
     fn snap(five: RateWindow, week: RateWindow) -> UsageSnapshot {
         UsageSnapshot {
-            five_hour: five,
-            weekly: week,
+            five_hour: Some(five),
+            weekly: Some(week),
             fetched_at_unix: 0,
         }
     }
@@ -359,6 +384,24 @@ mod tests {
         assert!(row.contains("5小时 42% 1时18分"));
         assert!(row.contains("每周 67% 3天4时"));
         assert!(row.ends_with('!'));
+    }
+
+    #[test]
+    fn only_present_window_is_rendered() {
+        let weekly_only = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(win(WindowKind::Weekly, 67.0, WEEKLY_SECONDS, 3 * ONE_DAY)),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready {
+            snapshot: weekly_only,
+        };
+        let row = format_overlay_row(&state, 0);
+        let tooltip = format_tray_tooltip(&state, 0);
+        assert!(row.contains("每周 67%"));
+        assert!(!row.contains("5小时"));
+        assert!(tooltip.contains("每周：已用 67%"));
+        assert!(!tooltip.contains("5小时"));
     }
 
     #[test]

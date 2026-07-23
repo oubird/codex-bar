@@ -113,18 +113,18 @@ mod tests {
     fn snapshot() -> UsageSnapshot {
         let now = UsageSnapshot::now();
         UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: 1.0,
                 window_seconds: FIVE_HOUR_SECONDS,
                 resets_at_unix: now + 3600,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: 2.0,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: now + 7200,
-            },
+            }),
             fetched_at_unix: now,
         }
     }

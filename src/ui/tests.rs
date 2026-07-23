@@ -13,18 +13,18 @@ mod cross_module {
     fn snap(five: f64, week: f64, resets_in_five: i64, resets_in_week: i64) -> UsageSnapshot {
         let now = UsageSnapshot::now();
         UsageSnapshot {
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 kind: WindowKind::FiveHour,
                 used_percent: five,
                 window_seconds: FIVE_HOUR_SECONDS,
                 resets_at_unix: now + resets_in_five,
-            },
-            weekly: RateWindow {
+            }),
+            weekly: Some(RateWindow {
                 kind: WindowKind::Weekly,
                 used_percent: week,
                 window_seconds: WEEKLY_SECONDS,
                 resets_at_unix: now + resets_in_week,
-            },
+            }),
             fetched_at_unix: now,
         }
     }

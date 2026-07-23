@@ -193,19 +193,42 @@ impl CodexProvider {
         let rate_limit = json
             .get("rate_limit")
             .ok_or(AppError::ProtocolChange("missing rate_limit"))?;
-        let primary = rate_limit
-            .get("primary_window")
-            .ok_or(AppError::WindowMissing(WindowKind::FiveHour))?;
-        let secondary = rate_limit
-            .get("secondary_window")
-            .ok_or(AppError::WindowMissing(WindowKind::Weekly))?;
 
         let now = UsageSnapshot::now();
-        let five = self.parse_window(WindowKind::FiveHour, primary, now)?;
-        let week = self.parse_window(WindowKind::Weekly, secondary, now)?;
+        let mut five_hour = None;
+        let mut weekly = None;
+        for slot in ["primary_window", "secondary_window"] {
+            let Some(value) = rate_limit.get(slot).filter(|value| !value.is_null()) else {
+                continue;
+            };
+            let limit_seconds_raw = value
+                .get("limit_window_seconds")
+                .and_then(|v| v.as_i64())
+                .ok_or(AppError::ProtocolChange("limit_window_seconds"))?;
+            if !(MIN_WINDOW_SECONDS as i64..=MAX_WINDOW_SECONDS as i64).contains(&limit_seconds_raw)
+            {
+                return Err(AppError::ProtocolChange("limit_window_seconds bounds"));
+            }
+            let kind = if limit_seconds_raw <= 24 * 60 * 60 {
+                WindowKind::FiveHour
+            } else {
+                WindowKind::Weekly
+            };
+            let window = self.parse_window(kind, value, now)?;
+            let destination = match kind {
+                WindowKind::FiveHour => &mut five_hour,
+                WindowKind::Weekly => &mut weekly,
+                WindowKind::Other => {
+                    unreachable!("duration classification only yields known roles")
+                }
+            };
+            if destination.replace(window).is_some() {
+                return Err(AppError::ProtocolChange("duplicate window kind"));
+            }
+        }
         let snap = UsageSnapshot {
-            five_hour: five,
-            weekly: week,
+            five_hour,
+            weekly,
             fetched_at_unix: now,
         };
         if !snap.is_sane() {
@@ -485,9 +508,12 @@ mod tests {
         let provider =
             CodexProvider::with_transport("https://example.test/wham/usage", Box::new(transport));
         let snap = provider.fetch(&creds()).expect("snapshot");
-        assert!((snap.five_hour.used_percent - 42.0).abs() < 0.001);
-        assert_eq!(snap.five_hour.window_seconds, FIVE_HOUR_SECONDS);
-        assert_eq!(snap.weekly.window_seconds, WEEKLY_SECONDS);
+        assert!((snap.five_hour.as_ref().unwrap().used_percent - 42.0).abs() < 0.001);
+        assert_eq!(
+            snap.five_hour.as_ref().unwrap().window_seconds,
+            FIVE_HOUR_SECONDS
+        );
+        assert_eq!(snap.weekly.as_ref().unwrap().window_seconds, WEEKLY_SECONDS);
     }
 
     #[test]
@@ -496,8 +522,8 @@ mod tests {
         let transport = FakeTransport::new(vec![body.leak()], vec![200]);
         let provider = CodexProvider::with_default(Box::new(transport));
         let snap = provider.fetch(&creds()).expect("snapshot");
-        assert_eq!(snap.five_hour.window_seconds, 6 * 3600);
-        assert_eq!(snap.weekly.window_seconds, WEEKLY_SECONDS);
+        assert_eq!(snap.five_hour.as_ref().unwrap().window_seconds, 6 * 3600);
+        assert_eq!(snap.weekly.as_ref().unwrap().window_seconds, WEEKLY_SECONDS);
     }
 
     #[test]
@@ -518,24 +544,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_primary_duration_above_role_bound() {
-        // 36 hours is above the 24-hour primary bound.
-        let body = body_5h(10.0, 36 * 3600, 36 * 3600 - 60);
+    fn classifies_24_hour_boundary_without_overlap() {
+        let now = UsageSnapshot::now();
+        let body = serde_json::json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 10.0,
+                    "limit_window_seconds": 86_400,
+                    "reset_at": now + 86_400,
+                },
+                "secondary_window": {
+                    "used_percent": 20.0,
+                    "limit_window_seconds": 86_401,
+                    "reset_at": now + 86_401,
+                }
+            }
+        })
+        .to_string();
         let transport = FakeTransport::new(vec![body.leak()], vec![200]);
         let provider = CodexProvider::with_default(Box::new(transport));
-        let err = provider.fetch(&creds()).expect_err("must fail");
-        assert!(matches!(
-            err,
-            AppError::WindowDurationMismatch {
-                kind: WindowKind::FiveHour,
-                actual_seconds: 129_600,
-                expected_seconds: 18_000,
-            }
-        ));
+        let snapshot = provider.fetch(&creds()).expect("boundary snapshot");
+        assert_eq!(snapshot.five_hour.as_ref().unwrap().window_seconds, 86_400);
+        assert_eq!(snapshot.weekly.as_ref().unwrap().window_seconds, 86_401);
     }
 
     #[test]
-    fn rejects_missing_secondary_window() {
+    fn rejects_duplicate_long_windows() {
+        let body = body_5h(10.0, 36 * 3600, 36 * 3600 - 60);
+        let transport = FakeTransport::new(vec![body.leak()], vec![200]);
+        let provider = CodexProvider::with_default(Box::new(transport));
+        assert_eq!(
+            provider
+                .fetch(&creds())
+                .expect_err("must reject duplicate role"),
+            AppError::ProtocolChange("duplicate window kind")
+        );
+    }
+
+    #[test]
+    fn accepts_only_short_window() {
         let now = UsageSnapshot::now();
         let body = format!(
             r#"{{"rate_limit":{{"primary_window":{{"used_percent":30.0,"limit_window_seconds":18000,"reset_at":{five}}}}}}}"#,
@@ -543,9 +590,38 @@ mod tests {
         );
         let transport = FakeTransport::new(vec![body.leak()], vec![200]);
         let provider = CodexProvider::with_default(Box::new(transport));
+        let snapshot = provider.fetch(&creds()).expect("short-only snapshot");
+        assert!(snapshot.five_hour.is_some());
+        assert!(snapshot.weekly.is_none());
+    }
+
+    #[test]
+    fn accepts_only_weekly_window_in_primary_slot() {
+        let now = UsageSnapshot::now();
+        let body = format!(
+            r#"{{"rate_limit":{{"primary_window":{{"used_percent":18.0,"limit_window_seconds":604800,"reset_at":{week}}},"secondary_window":null}}}}"#,
+            week = now + 3 * 24 * 3600,
+        );
+        let transport = FakeTransport::new(vec![body.leak()], vec![200]);
+        let provider = CodexProvider::with_default(Box::new(transport));
+        let snapshot = provider.fetch(&creds()).expect("weekly-only snapshot");
+        assert!(snapshot.five_hour.is_none());
         assert_eq!(
-            provider.fetch(&creds()).expect_err("must fail"),
-            AppError::WindowMissing(WindowKind::Weekly),
+            snapshot.weekly.as_ref().unwrap().window_seconds,
+            WEEKLY_SECONDS
+        );
+    }
+
+    #[test]
+    fn rejects_response_without_any_window() {
+        let transport =
+            FakeTransport::new(vec![r#"{"rate_limit":{"primary_window":null}}"#], vec![200]);
+        let provider = CodexProvider::with_default(Box::new(transport));
+        assert_eq!(
+            provider
+                .fetch(&creds())
+                .expect_err("empty snapshot must fail"),
+            AppError::ProtocolChange("snapshot validation")
         );
     }
 
