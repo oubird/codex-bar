@@ -1,9 +1,10 @@
 //! Formatting for the title-bar overlay and tray tooltip.
 //!
 //! This module is pure: it never reaches into I/O, GUI, or Win32 APIs and is
-//! therefore fully exercised in unit tests. Display labels intentionally
-//! always communicate "used" — never "remaining" — to match Codex's web
-//! usage UI and the user's request.
+//! therefore fully exercised in unit tests. User-visible text shows the
+//! remaining percentage so the value matches what the user can still use;
+//! the technical diagnostic summary continues to render the server-reported
+//! `used_percent` so log search and historical triage remain stable.
 
 use crate::model::{RateWindow, ViewState};
 
@@ -13,6 +14,13 @@ const ONE_DAY: i64 = 24 * ONE_HOUR;
 
 pub fn format_used_percent(window: &RateWindow) -> String {
     format!("{}%", window.used_percent_rounded())
+}
+
+/// Remaining quota value used by the user-facing overlay and tooltip.
+/// Mirrors `RateWindow::remaining_percent_rounded` so the value stays
+/// consistent with the headline colour thresholds derived from `used_percent`.
+pub fn format_remaining_percent(window: &RateWindow) -> String {
+    format!("{}%", window.remaining_percent_rounded())
 }
 
 /// Human-readable countdown that matches CodexBar-style `1h18m` / `3d4h`.
@@ -56,7 +64,7 @@ pub fn format_window_label(window: &RateWindow) -> String {
             "5小时".to_string()
         }
         WindowKind::Weekly if window.window_seconds == crate::model::WEEKLY_SECONDS => {
-            "每周".to_string()
+            "周限额".to_string()
         }
         WindowKind::FiveHour => format!("短周期 {}", format_duration_zh(window.window_seconds)),
         WindowKind::Weekly => format!("长周期 {}", format_duration_zh(window.window_seconds)),
@@ -121,7 +129,7 @@ pub fn format_overlay_row(state: &ViewState, now_unix: i64) -> String {
             format!(
                 "{} {} {}",
                 format_window_label(window),
-                format_used_percent(window),
+                format_remaining_percent(window),
                 format_countdown_compact(window, now_unix)
             )
         })
@@ -235,9 +243,9 @@ pub fn format_diagnostic_summary(state: &ViewState, now_unix: i64) -> String {
 
 fn usage_line_zh(window: &RateWindow, now_unix: i64) -> String {
     let label = format_window_label(window);
-    let used = format_used_percent(window);
+    let remaining = format_remaining_percent(window);
     let countdown = format_countdown_compact(window, now_unix);
-    format!("{label}：已用 {used}，{countdown}后重置")
+    format!("{label}：剩余 {remaining}，{countdown}后重置",)
 }
 
 fn usage_line_en(window: &RateWindow, now_unix: i64) -> String {
@@ -381,8 +389,8 @@ mod tests {
             },
             0,
         );
-        assert!(row.contains("5小时 42% 1时18分"));
-        assert!(row.contains("每周 67% 3天4时"));
+        assert!(row.contains("5小时 58% 1时18分"));
+        assert!(row.contains("周限额 33% 3天4时"));
         assert!(row.ends_with('!'));
     }
 
@@ -398,10 +406,31 @@ mod tests {
         };
         let row = format_overlay_row(&state, 0);
         let tooltip = format_tray_tooltip(&state, 0);
-        assert!(row.contains("每周 67%"));
+        assert!(row.contains("周限额 33%"));
         assert!(!row.contains("5小时"));
-        assert!(tooltip.contains("每周：已用 67%"));
+        assert!(!row.contains("剩余"));
+        assert!(tooltip.contains("周限额：剩余 33%"));
         assert!(!tooltip.contains("5小时"));
+    }
+
+    #[test]
+    fn remaining_percent_matches_remaining_of_25() {
+        let weekly = win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, 5 * ONE_DAY);
+        assert_eq!(format_remaining_percent(&weekly), "75%");
+    }
+
+    #[test]
+    fn tooltip_summary_shows_remaining() {
+        let weekly_only = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, 5 * ONE_DAY)),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready {
+            snapshot: weekly_only,
+        };
+        let tooltip = format_tray_tooltip(&state, 0);
+        assert!(tooltip.contains("周限额：剩余 75%"));
     }
 
     #[test]
@@ -454,7 +483,7 @@ mod tests {
         let five = win(WindowKind::FiveHour, 10.0, FIVE_HOUR_SECONDS, 600);
         let week = win(WindowKind::Weekly, 20.0, WEEKLY_SECONDS, 3600);
         assert_eq!(format_window_label(&five), "5小时");
-        assert_eq!(format_window_label(&week), "每周");
+        assert_eq!(format_window_label(&week), "周限额");
     }
 
     #[test]

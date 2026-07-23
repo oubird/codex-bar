@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
     DrawTextW, EndPaint, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA,
     AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, PAINTSTRUCT,
+    DEFAULT_CHARSET, DIB_RGB_COLORS, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, PAINTSTRUCT,
     TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -31,6 +31,59 @@ use crate::model::ViewState;
 
 const OVERLAY_CLASS: &str = "CodexPlusOverlayWindow";
 const HTTRANSPARENT: isize = -1;
+
+/// Super-sampling factor used when rasterising the overlay text. Drawing
+/// `DrawTextW` into a high-resolution off-screen DIB and down-sampling the
+/// per-pixel coverage produces visibly smoother anti-aliased edges on a
+/// transparent layered window, where the ClearType-friendly sub-pixel grid
+/// is unavailable.
+const TEXT_RENDER_SCALE: i32 = 3;
+
+/// Average the per-pixel coverage of a `scale x scale` block into a single
+/// 0..=255 alpha value. The downsampler rounds to nearest so that opaque
+/// blocks stay fully covered instead of biasing toward transparent.
+fn downsample_alpha_block(
+    high_pixels: &[u8],
+    render_width: usize,
+    x: usize,
+    y: usize,
+    scale: usize,
+) -> u8 {
+    let mut sum: u32 = 0;
+    let block_left = x * scale;
+    let block_top = y * scale;
+    for block_y in 0..scale {
+        let row_offset = (block_top + block_y) * render_width * 4;
+        for block_x in 0..scale {
+            let pixel_offset = row_offset + (block_left + block_x) * 4;
+            let b = high_pixels[pixel_offset];
+            let g = high_pixels[pixel_offset + 1];
+            let r = high_pixels[pixel_offset + 2];
+            let coverage = (b.max(g)).max(r) as u32;
+            sum += coverage;
+        }
+    }
+    let samples = (scale * scale) as u32;
+    ((sum + samples / 2) / samples).min(255) as u8
+}
+
+/// Convert per-pixel coverage into the pre-multiplied BGRA bytes expected by
+/// `UpdateLayeredWindow(ULW_ALPHA)`. Each group of four bytes encodes
+/// `B, G, R, A` where every colour channel is scaled by `alpha / 255` so a
+/// fully transparent pixel collapses to `[0, 0, 0, 0]` and a fully opaque
+/// pixel keeps the exact RGB payload.
+fn build_premultiplied_pixels(coverages: &[u8], rgb: (u8, u8, u8)) -> Vec<u8> {
+    let (red, green, blue) = rgb;
+    let mut pixels = Vec::with_capacity(coverages.len() * 4);
+    for &alpha in coverages {
+        let a = alpha as u16;
+        pixels.push(((blue as u16 * a) / 255) as u8);
+        pixels.push(((green as u16 * a) / 255) as u8);
+        pixels.push(((red as u16 * a) / 255) as u8);
+        pixels.push(alpha);
+    }
+    pixels
+}
 
 struct OverlayData {
     state: ViewState,
@@ -227,7 +280,15 @@ unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), (
         return Err(());
     };
     let row = build_text(&data.state, crate::model::UsageSnapshot::now());
-    let (red, green, blue) = tone_text_rgb(row.tone);
+    let tone_rgb = tone_text_rgb(row.tone);
+
+    let scale = TEXT_RENDER_SCALE;
+    let render_width = width.checked_mul(scale).ok_or(())?;
+    let render_height = height.checked_mul(scale).ok_or(())?;
+    let width_us = width as usize;
+    let height_us = height as usize;
+    let render_width_us = render_width as usize;
+    let scale_us = scale as usize;
 
     let screen_dc = GetDC(HWND::default());
     if screen_dc.is_invalid() {
@@ -239,43 +300,44 @@ unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), (
         return Err(());
     }
 
-    let bitmap_info = BITMAPINFO {
+    let render_byte_len = render_width_us * (render_height as usize) * 4;
+
+    // High-resolution DIB used only for off-screen text rasterisation.
+    let high_info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
+            biWidth: render_width,
+            biHeight: -render_height,
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
-            biSizeImage: (width * height * 4) as u32,
+            biSizeImage: render_byte_len as u32,
             ..Default::default()
         },
         ..Default::default()
     };
-    let mut bits: *mut c_void = std::ptr::null_mut();
-    let bitmap = match CreateDIBSection(
+    let mut high_bits: *mut c_void = std::ptr::null_mut();
+    let high_bitmap = match CreateDIBSection(
         memory_dc,
-        &bitmap_info,
+        &high_info,
         DIB_RGB_COLORS,
-        &mut bits,
+        &mut high_bits,
         HANDLE::default(),
         0,
     ) {
-        Ok(bitmap) if !bits.is_null() => bitmap,
+        Ok(handle) if !high_bits.is_null() => handle,
         _ => {
             let _ = DeleteDC(memory_dc);
             let _ = ReleaseDC(HWND::default(), screen_dc);
             return Err(());
         }
     };
-    let previous_bitmap = SelectObject(memory_dc, bitmap);
-
-    let byte_len = (width as usize) * (height as usize) * 4;
-    std::ptr::write_bytes(bits, 0, byte_len);
+    let previous_bitmap = SelectObject(memory_dc, high_bitmap);
+    std::ptr::write_bytes(high_bits, 0, render_byte_len);
 
     let dpi = GetDpiForWindow(hwnd).max(96);
-    let font_height = -((12_i32 * dpi as i32 + 48) / 96);
-    let face: Vec<u16> = "Microsoft YaHei UI"
+    let font_height = -((14_i32 * dpi as i32 * scale + 48) / 96);
+    let face: Vec<u16> = "Segoe UI Variable Text"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -299,29 +361,77 @@ unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), (
     let _ = SetBkMode(memory_dc, TRANSPARENT);
     let _ = SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
     let mut text: Vec<u16> = row.text.encode_utf16().collect();
+    let padding = ((4_i32 * dpi as i32 * scale) + 48) / 96;
     let mut text_rect = RECT {
         left: 0,
         top: 0,
-        right: width,
-        bottom: height,
+        right: render_width.saturating_sub(padding),
+        bottom: render_height,
     };
     let _ = DrawTextW(
         memory_dc,
         &mut text,
         &mut text_rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
     );
     let _ = SelectObject(memory_dc, previous_font);
     let _ = DeleteObject(font);
 
-    let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, byte_len);
-    for pixel in pixels.chunks_exact_mut(4) {
-        let coverage = pixel[0].max(pixel[1]).max(pixel[2]);
-        pixel[0] = ((blue as u16 * coverage as u16) / 255) as u8;
-        pixel[1] = ((green as u16 * coverage as u16) / 255) as u8;
-        pixel[2] = ((red as u16 * coverage as u16) / 255) as u8;
-        pixel[3] = coverage;
+    let high_pixels = std::slice::from_raw_parts(high_bits as *const u8, render_byte_len);
+    let mut coverages = Vec::with_capacity(width_us * height_us);
+    for y in 0..height_us {
+        for x in 0..width_us {
+            coverages.push(downsample_alpha_block(
+                high_pixels,
+                render_width_us,
+                x,
+                y,
+                scale_us,
+            ));
+        }
     }
+
+    // Release the high-resolution DIB before swapping the final DIB into the
+    // same DC. UpdateLayeredWindow must see a bitmap whose stride matches
+    // the window size exactly; writing compact target pixels into the
+    // oversized buffer produced the vertically-compressed output bug.
+    let _ = SelectObject(memory_dc, previous_bitmap);
+    let _ = DeleteObject(high_bitmap);
+
+    let final_byte_len = width_us * height_us * 4;
+    let final_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: final_byte_len as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut final_bits: *mut c_void = std::ptr::null_mut();
+    let final_bitmap = match CreateDIBSection(
+        memory_dc,
+        &final_info,
+        DIB_RGB_COLORS,
+        &mut final_bits,
+        HANDLE::default(),
+        0,
+    ) {
+        Ok(handle) if !final_bits.is_null() => handle,
+        _ => {
+            let _ = DeleteDC(memory_dc);
+            let _ = ReleaseDC(HWND::default(), screen_dc);
+            return Err(());
+        }
+    };
+    let previous_final_bitmap = SelectObject(memory_dc, final_bitmap);
+
+    let final_pixels = build_premultiplied_pixels(&coverages, tone_rgb);
+    std::ptr::copy_nonoverlapping(final_pixels.as_ptr(), final_bits as *mut u8, final_byte_len);
 
     let destination_point = POINT {
         x: destination.left,
@@ -350,8 +460,8 @@ unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), (
         ULW_ALPHA,
     );
 
-    let _ = SelectObject(memory_dc, previous_bitmap);
-    let _ = DeleteObject(bitmap);
+    let _ = SelectObject(memory_dc, previous_final_bitmap);
+    let _ = DeleteObject(final_bitmap);
     let _ = DeleteDC(memory_dc);
     let _ = ReleaseDC(HWND::default(), screen_dc);
     update_result.map_err(|_| ())
@@ -374,7 +484,7 @@ pub fn target_overlay_rect(target: HWND) -> Option<RECT> {
         let width = (OVERLAY_LOGICAL_WIDTH * dpi as i32 + 48) / 96;
         let height = (OVERLAY_LOGICAL_HEIGHT * dpi as i32 + 48) / 96;
         let caption_button = ((46_i32 * dpi as i32) + 48) / 96;
-        let margin = ((8_i32 * dpi as i32) + 48) / 96;
+        let margin = ((6_i32 * dpi as i32) + 48) / 96;
         let available = frame.right - frame.left - caption_button * 3 - margin;
         if available < width {
             return None;
@@ -415,5 +525,99 @@ mod tests {
         assert_eq!(tone_text_rgb(Tone::Ok), (82, 88, 96));
         assert_ne!(tone_text_rgb(Tone::Warn), tone_text_rgb(Tone::Critical));
         assert_ne!(tone_text_rgb(Tone::Ok), tone_text_rgb(Tone::Stale));
+    }
+
+    fn build_block(value: u8, width: usize, height: usize) -> Vec<u8> {
+        let mut pixels = vec![0u8; width * height * 4];
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk[0] = value;
+            chunk[1] = value;
+            chunk[2] = value;
+        }
+        pixels
+    }
+
+    #[test]
+    fn downsample_alpha_block_zero_for_empty_block() {
+        let pixels = build_block(0, 9, 9);
+        assert_eq!(downsample_alpha_block(&pixels, 9, 0, 0, 3), 0);
+        assert_eq!(downsample_alpha_block(&pixels, 9, 2, 2, 3), 0);
+    }
+
+    #[test]
+    fn downsample_alpha_block_full_for_opaque_block() {
+        let pixels = build_block(255, 9, 9);
+        assert_eq!(downsample_alpha_block(&pixels, 9, 0, 0, 3), 255);
+        assert_eq!(downsample_alpha_block(&pixels, 9, 2, 2, 3), 255);
+    }
+
+    #[test]
+    fn downsample_alpha_block_averages_halftone() {
+        // Fill a 9x3 high-res bitmap so the downsampler can read three
+        // neighbouring 3x3 blocks. Each row is constant 51, so every
+        // 3x3 block averages to 51.
+        let render_width = 9;
+        let mut pixels = vec![0u8; render_width * 3 * 4];
+        for y in 0..3 {
+            for x in 0..render_width {
+                let offset = (y * render_width + x) * 4;
+                pixels[offset] = 51;
+                pixels[offset + 1] = 51;
+                pixels[offset + 2] = 51;
+            }
+        }
+        for block_x in 0..3 {
+            assert_eq!(
+                downsample_alpha_block(&pixels, render_width, block_x, 0, 3),
+                51
+            );
+        }
+    }
+
+    #[test]
+    fn downsample_alpha_block_rounds_half_to_nearest() {
+        // 9x3 high-res bitmap where the first 3x3 block holds five pixels
+        // of 255 and four of 0 → average = 141.666, rounded to 142.
+        let render_width = 9;
+        let mut pixels = vec![0u8; render_width * 3 * 4];
+        let bright: [(usize, usize); 5] = [(0, 0), (0, 2), (1, 1), (2, 0), (2, 2)];
+        for &(y, x) in &bright {
+            let offset = (y * render_width + x) * 4;
+            pixels[offset] = 255;
+            pixels[offset + 1] = 255;
+            pixels[offset + 2] = 255;
+        }
+        assert_eq!(downsample_alpha_block(&pixels, render_width, 0, 0, 3), 142);
+        // The remaining blocks are all zero.
+        assert_eq!(downsample_alpha_block(&pixels, render_width, 1, 0, 3), 0);
+    }
+
+    #[test]
+    fn build_premultiplied_pixels_zero_alpha_is_transparent_black() {
+        let pixels = build_premultiplied_pixels(&[0], (176, 40, 48));
+        assert_eq!(pixels, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn build_premultiplied_pixels_full_alpha_preserves_rgb() {
+        let pixels = build_premultiplied_pixels(&[255], (176, 40, 48));
+        assert_eq!(pixels, vec![48, 40, 176, 255]);
+    }
+
+    #[test]
+    fn build_premultiplied_pixels_half_alpha_premultiplies() {
+        // (48 * 128) / 255 = 24; (40 * 128) / 255 = 20; (176 * 128) / 255 = 88.
+        let pixels = build_premultiplied_pixels(&[128], (176, 40, 48));
+        assert_eq!(pixels, vec![24, 20, 88, 128]);
+    }
+
+    #[test]
+    fn build_premultiplied_pixels_preserves_pixel_order_and_length() {
+        let pixels = build_premultiplied_pixels(&[0, 255, 128], (10, 20, 30));
+        assert_eq!(pixels.len(), 12);
+        assert_eq!(&pixels[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&pixels[4..8], &[30, 20, 10, 255]);
+        // Third pixel: B = 30*128/255 = 15; G = 20*128/255 = 10; R = 10*128/255 = 5.
+        assert_eq!(&pixels[8..12], &[15, 10, 5, 128]);
     }
 }

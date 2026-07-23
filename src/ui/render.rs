@@ -5,12 +5,12 @@
 
 #![cfg(windows)]
 
-use crate::formatting::{format_countdown_compact, format_used_percent, format_window_label};
+use crate::formatting::{format_countdown_compact, format_remaining_percent, format_window_label};
 use crate::model::ViewState;
 
-/// Logical (DIP) size of the overlay — sized for `5h 42% · 1h18m   week 67% · 3d4h`.
+/// Logical (DIP) size of the overlay — sized for `5小时 42% 1时18分   周限额 67% 3天4时`.
 pub const OVERLAY_LOGICAL_WIDTH: i32 = 340;
-pub const OVERLAY_LOGICAL_HEIGHT: i32 = 28;
+pub const OVERLAY_LOGICAL_HEIGHT: i32 = 30;
 
 #[derive(Debug, Clone)]
 pub struct RenderedRow {
@@ -69,7 +69,7 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
             format!(
                 "{} {} {}",
                 format_window_label(window),
-                format_used_percent(window),
+                format_remaining_percent(window),
                 format_countdown_compact(window, now_unix)
             )
         })
@@ -161,8 +161,9 @@ mod tests {
         let mut snapshot = snap(42.0, 67.0);
         snapshot.five_hour = None;
         let row = build_text(&ViewState::Ready { snapshot }, UsageSnapshot::now());
-        assert!(row.text.contains("每周 67%"));
+        assert!(row.text.contains("周限额 33%"));
         assert!(!row.text.contains("5小时"));
+        assert!(!row.text.contains("剩余"));
     }
 
     #[test]
@@ -180,7 +181,8 @@ mod tests {
                 .resets_at_unix
                 - 1800,
         );
-        assert!(row.text.contains("5小时 42%"));
-        assert!(row.text.contains("每周 67%"));
+        assert!(row.text.contains("5小时 58%"));
+        assert!(row.text.contains("周限额 33%"));
+        assert!(!row.text.contains("剩余"));
     }
 }

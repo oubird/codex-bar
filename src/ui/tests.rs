@@ -52,8 +52,9 @@ mod cross_module {
             },
             UsageSnapshot::now(),
         );
-        assert!(row.contains("5小时 20%"));
-        assert!(row.contains("每周 60%"));
+        assert!(row.contains("5小时 80%"));
+        assert!(row.contains("周限额 40%"));
+        assert!(!row.contains("剩余"));
         assert!(!row.ends_with('!'));
     }
 }
