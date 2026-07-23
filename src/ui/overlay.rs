@@ -2,20 +2,26 @@
 
 #![cfg(windows)]
 
+use std::ffi::c_void;
+
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-    InvalidateRect, SelectObject, SetBkMode, SetTextColor, DEFAULT_CHARSET, DT_CENTER,
-    DT_SINGLELINE, DT_VCENTER, FW_NORMAL, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA,
+    AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, PAINTSTRUCT,
+    TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
-    GetWindowRect, RegisterClassExW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, GetWindowRect,
+    RegisterClassExW, SetWindowLongPtrW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_HREDRAW,
+    CS_VREDRAW, GWLP_HWNDPARENT, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, ULW_ALPHA, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
+    WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use super::native;
@@ -29,6 +35,7 @@ const HTTRANSPARENT: isize = -1;
 struct OverlayData {
     state: ViewState,
     visible: bool,
+    owner: HWND,
 }
 
 pub struct OverlayHandle {
@@ -52,6 +59,7 @@ impl OverlayHandle {
             let data = Box::new(OverlayData {
                 state: ViewState::Loading { cached: None },
                 visible: false,
+                owner: HWND::default(),
             });
             let data_ptr = Box::into_raw(data);
             let hwnd = CreateWindowExW(
@@ -69,7 +77,6 @@ impl OverlayHandle {
                 Some(data_ptr.cast()),
             )
             .map_err(|_| "Could not create usage overlay.".to_string())?;
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 225, LWA_ALPHA);
             Ok(Self { hwnd })
         }
     }
@@ -78,7 +85,6 @@ impl OverlayHandle {
         unsafe {
             if let Some(data) = data_for(self.hwnd) {
                 data.state = state;
-                let _ = InvalidateRect(self.hwnd, None, false);
             }
         }
     }
@@ -91,7 +97,7 @@ impl OverlayHandle {
         }
     }
 
-    pub fn sync_to_target(&self, target: Option<HWND>, enabled: bool) {
+    pub fn sync_to_target(&self, target: Option<HWND>, enabled: bool, target_is_foreground: bool) {
         let Some(target) = target else {
             self.hide();
             return;
@@ -108,20 +114,39 @@ impl OverlayHandle {
                 self.hide();
                 return;
             }
+            if data.owner != target {
+                let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, target.0 as isize);
+                data.owner = target;
+            }
         }
         let Some(rect) = target_overlay_rect(target) else {
             self.hide();
             return;
         };
+
         unsafe {
+            if render_transparent_text(self.hwnd, rect).is_err() {
+                self.hide();
+                return;
+            }
+
+            let insert_after = if target_is_foreground {
+                HWND_TOP
+            } else {
+                HWND::default()
+            };
+            let mut flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+            if !target_is_foreground {
+                flags |= SWP_NOZORDER;
+            }
             let _ = SetWindowPos(
                 self.hwnd,
-                HWND_TOPMOST,
+                insert_after,
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
                 rect.bottom - rect.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                flags,
             );
             if let Some(data) = data_for(self.hwnd) {
                 data.visible = true;
@@ -169,7 +194,9 @@ unsafe extern "system" fn overlay_proc(
             LRESULT(1)
         }
         WM_PAINT => {
-            paint_overlay(hwnd);
+            let mut paint = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut paint);
+            let _ = EndPaint(hwnd, &paint);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
@@ -190,29 +217,68 @@ unsafe extern "system" fn overlay_proc(
     }
 }
 
-unsafe fn paint_overlay(hwnd: HWND) {
-    let mut paint = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut paint);
-    let mut rect = RECT::default();
-    let _ = GetClientRect(hwnd, &mut rect);
+unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), ()> {
+    let width = destination.right - destination.left;
+    let height = destination.bottom - destination.top;
+    if width <= 0 || height <= 0 {
+        return Err(());
+    }
     let Some(data) = data_for(hwnd) else {
-        let _ = EndPaint(hwnd, &paint);
-        return;
+        return Err(());
     };
     let row = build_text(&data.state, crate::model::UsageSnapshot::now());
-    let background = match row.tone {
-        Tone::Ok => COLORREF(0x282828),
-        Tone::Warn => COLORREF(0x214675),
-        Tone::Critical => COLORREF(0x3030A0),
-        Tone::Stale => COLORREF(0x555555),
+    let (red, green, blue) = tone_text_rgb(row.tone);
+
+    let screen_dc = GetDC(HWND::default());
+    if screen_dc.is_invalid() {
+        return Err(());
+    }
+    let memory_dc = CreateCompatibleDC(screen_dc);
+    if memory_dc.is_invalid() {
+        let _ = ReleaseDC(HWND::default(), screen_dc);
+        return Err(());
+    }
+
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (width * height * 4) as u32,
+            ..Default::default()
+        },
+        ..Default::default()
     };
-    let foreground = COLORREF(0xF0F0F0);
-    let brush = CreateSolidBrush(background);
-    let _ = FillRect(dc, &rect, brush);
-    let _ = DeleteObject(brush);
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let bitmap = match CreateDIBSection(
+        memory_dc,
+        &bitmap_info,
+        DIB_RGB_COLORS,
+        &mut bits,
+        HANDLE::default(),
+        0,
+    ) {
+        Ok(bitmap) if !bits.is_null() => bitmap,
+        _ => {
+            let _ = DeleteDC(memory_dc);
+            let _ = ReleaseDC(HWND::default(), screen_dc);
+            return Err(());
+        }
+    };
+    let previous_bitmap = SelectObject(memory_dc, bitmap);
+
+    let byte_len = (width as usize) * (height as usize) * 4;
+    std::ptr::write_bytes(bits, 0, byte_len);
+
     let dpi = GetDpiForWindow(hwnd).max(96);
     let font_height = -((12_i32 * dpi as i32 + 48) / 96);
-    let face: Vec<u16> = "Segoe UI".encode_utf16().chain(Some(0)).collect();
+    let face: Vec<u16> = "Microsoft YaHei UI"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let font = CreateFontW(
         font_height,
         0,
@@ -225,23 +291,79 @@ unsafe fn paint_overlay(hwnd: HWND) {
         DEFAULT_CHARSET.0 as u32,
         0,
         0,
-        0,
+        ANTIALIASED_QUALITY.0 as u32,
         0,
         PCWSTR(face.as_ptr()),
     );
-    let previous = SelectObject(dc, font);
-    let _ = SetBkMode(dc, TRANSPARENT);
-    let _ = SetTextColor(dc, foreground);
+    let previous_font = SelectObject(memory_dc, font);
+    let _ = SetBkMode(memory_dc, TRANSPARENT);
+    let _ = SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
     let mut text: Vec<u16> = row.text.encode_utf16().collect();
+    let mut text_rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
     let _ = DrawTextW(
-        dc,
+        memory_dc,
         &mut text,
-        &mut rect,
+        &mut text_rect,
         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
-    let _ = SelectObject(dc, previous);
+    let _ = SelectObject(memory_dc, previous_font);
     let _ = DeleteObject(font);
-    let _ = EndPaint(hwnd, &paint);
+
+    let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, byte_len);
+    for pixel in pixels.chunks_exact_mut(4) {
+        let coverage = pixel[0].max(pixel[1]).max(pixel[2]);
+        pixel[0] = ((blue as u16 * coverage as u16) / 255) as u8;
+        pixel[1] = ((green as u16 * coverage as u16) / 255) as u8;
+        pixel[2] = ((red as u16 * coverage as u16) / 255) as u8;
+        pixel[3] = coverage;
+    }
+
+    let destination_point = POINT {
+        x: destination.left,
+        y: destination.top,
+    };
+    let source_point = POINT { x: 0, y: 0 };
+    let size = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let update_result = UpdateLayeredWindow(
+        hwnd,
+        screen_dc,
+        Some(&destination_point),
+        Some(&size),
+        memory_dc,
+        Some(&source_point),
+        COLORREF(0),
+        Some(&blend),
+        ULW_ALPHA,
+    );
+
+    let _ = SelectObject(memory_dc, previous_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(memory_dc);
+    let _ = ReleaseDC(HWND::default(), screen_dc);
+    update_result.map_err(|_| ())
+}
+
+fn tone_text_rgb(tone: Tone) -> (u8, u8, u8) {
+    match tone {
+        Tone::Ok => (82, 88, 96),
+        Tone::Warn => (154, 91, 0),
+        Tone::Critical => (176, 40, 48),
+        Tone::Stale => (112, 118, 126),
+    }
 }
 
 pub fn target_overlay_rect(target: HWND) -> Option<RECT> {
@@ -276,5 +398,22 @@ pub fn is_target_displayable(target: HWND) -> bool {
         !IsIconic(target).as_bool()
             && native::window_rect(target)
                 .is_some_and(|rect| rect.right > rect.left && rect.bottom > rect.top)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_style_is_not_globally_topmost() {
+        assert_eq!(native::overlay_extended_styles_bits() & 0x00000008, 0);
+    }
+
+    #[test]
+    fn tone_colors_are_distinct_and_native_like() {
+        assert_eq!(tone_text_rgb(Tone::Ok), (82, 88, 96));
+        assert_ne!(tone_text_rgb(Tone::Warn), tone_text_rgb(Tone::Critical));
+        assert_ne!(tone_text_rgb(Tone::Ok), tone_text_rgb(Tone::Stale));
     }
 }

@@ -6,11 +6,12 @@ use std::sync::mpsc::Receiver;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetWindowLongPtrW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, GWLP_USERDATA, MSG, SW_HIDE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_TIMER,
-    WNDCLASSEXW,
+    GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW,
+    ShowWindow, TranslateMessage, GWLP_USERDATA, HICON, IDI_APPLICATION, MSG, SW_HIDE,
+    WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSEXW,
 };
 
 use super::app_state::{AppState, RefreshDisposition};
@@ -32,8 +33,27 @@ pub fn wide_str(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+pub fn module_instance() -> HINSTANCE {
+    unsafe {
+        GetModuleHandleW(None)
+            .map(|module| HINSTANCE(module.0))
+            .unwrap_or_default()
+    }
+}
+
+pub fn load_app_icon() -> HICON {
+    unsafe {
+        LoadIconW(module_instance(), IDI_APPLICATION).unwrap_or_else(|_| {
+            LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default()
+        })
+    }
+}
+
 pub fn overlay_extended_styles_bits() -> u32 {
-    0x00000080 | 0x08000000 | 0x00080000 | 0x00000020 | 0x00000008
+    // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT.
+    // Deliberately omit WS_EX_TOPMOST: the overlay belongs to the Codex window
+    // and must not float above unrelated foreground applications.
+    0x00000080 | 0x08000000 | 0x00080000 | 0x00000020
 }
 
 pub fn window_rect(hwnd: HWND) -> Option<RECT> {
@@ -105,6 +125,7 @@ struct AppRuntime {
     tray: TrayIcon,
     poll_sender: PollSender,
     poll_receiver: Receiver<PollOutcome>,
+    last_target: Option<target_window::WindowIdentity>,
 }
 
 impl AppRuntime {
@@ -122,6 +143,7 @@ impl AppRuntime {
             tray,
             poll_sender,
             poll_receiver,
+            last_target: None,
         };
         runtime.request_refresh();
         Ok(runtime)
@@ -164,10 +186,23 @@ impl AppRuntime {
     }
 
     fn sync_overlay(&mut self) {
-        let target =
-            target_window::foreground_codex_window().map(|identity| HWND(identity.hwnd as *mut _));
-        self.overlay
-            .sync_to_target(target, self.state.settings.overlay_enabled);
+        if let Some(foreground) = target_window::foreground_codex_window() {
+            self.last_target = Some(foreground);
+        } else if let Some(previous) = self.last_target.as_ref() {
+            self.last_target = target_window::revalidate_target(previous);
+        }
+
+        let target = self
+            .last_target
+            .as_ref()
+            .map(|identity| HWND(identity.hwnd as *mut _));
+        let target_is_foreground = target
+            .is_some_and(|candidate| root_owner(foreground_window()) == root_owner(candidate));
+        self.overlay.sync_to_target(
+            target,
+            self.state.settings.overlay_enabled,
+            target_is_foreground,
+        );
         self.tray.add_or_update(&self.state.state);
     }
 

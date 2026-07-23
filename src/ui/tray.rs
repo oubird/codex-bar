@@ -3,17 +3,18 @@
 #![cfg(windows)]
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, SetForegroundWindow,
-    TrackPopupMenu, IDI_APPLICATION, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TrackPopupMenu,
+    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON,
 };
 
+use super::native;
 use crate::formatting::format_tray_tooltip;
 use crate::model::ViewState;
 
@@ -40,7 +41,7 @@ impl TrayIcon {
             let mut data = tray_data(self.hwnd);
             data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             data.uCallbackMessage = WM_APP_TRAY;
-            data.hIcon = LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default();
+            data.hIcon = native::load_app_icon();
             write_tip(
                 &mut data,
                 &format_tray_tooltip(state, crate::model::UsageSnapshot::now()),

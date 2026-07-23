@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use super::native;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -11,7 +12,6 @@ use windows::Win32::Graphics::Gdi::{
     InvalidateRect, SetBkMode, SetTextColor, DEFAULT_CHARSET, FW_NORMAL, HBRUSH, HDC, HFONT,
     PAINTSTRUCT, TRANSPARENT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, SetWindowTheme, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
 };
@@ -19,14 +19,14 @@ use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetWindowLongPtrW,
-    GetWindowTextW, IsDialogMessageW, IsWindow, LoadIconW, PostMessageW, RegisterClassExW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, BM_GETCHECK,
-    BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON,
-    CW_USEDEFAULT, DM_SETDEFID, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_STYLE, HMENU, MSG,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_DISABLED, WS_EX_CLIENTEDGE, WS_GROUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, IsDialogMessageW, IsWindow, PostMessageW, RegisterClassExW, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, BM_GETCHECK, BM_SETCHECK,
+    BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT,
+    DM_SETDEFID, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_STYLE, HMENU, MSG, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_DISABLED,
+    WS_EX_CLIENTEDGE, WS_GROUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::settings::{self, ProxyMode, SettingsPatch};
@@ -34,7 +34,6 @@ use crate::settings::{self, ProxyMode, SettingsPatch};
 pub const WM_APP_SETTINGS_CHANGED: u32 = 0x8000 + 41;
 
 const CLASS: &str = "CodexPlusSettingsWindow";
-const ICON_RESOURCE_ID: usize = 32512;
 
 const ID_SAVE: usize = 1;
 const ID_CANCEL: usize = 2;
@@ -184,11 +183,8 @@ pub fn open(host: HWND) {
         let dpi = GetDpiForWindow(host).max(96);
         let style = settings_window_style();
         let (width, height) = outer_size_for_client(dpi, style);
-        let instance = GetModuleHandleW(None)
-            .map(|module| HINSTANCE(module.0))
-            .unwrap_or_default();
-        let icon_name = PCWSTR(ICON_RESOURCE_ID as *const u16);
-        let icon = LoadIconW(instance, icon_name).unwrap_or_default();
+        let instance = native::module_instance();
+        let icon = native::load_app_icon();
 
         let class_name = wide(CLASS);
         let definition = WNDCLASSEXW {

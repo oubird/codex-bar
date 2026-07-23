@@ -199,6 +199,18 @@ pub fn is_target_displayable(hwnd: windows::Win32::Foundation::HWND) -> bool {
     true
 }
 
+/// Revalidate a previously selected Codex window without requiring it to be
+/// the foreground window. This guards against stale/reused HWND values by
+/// checking both the original PID and the current executable identity.
+pub fn revalidate_target(previous: &WindowIdentity) -> Option<WindowIdentity> {
+    let hwnd = windows::Win32::Foundation::HWND(previous.hwnd as *mut _);
+    let current = inspect_window(hwnd)?;
+    if current.pid != previous.pid || !is_codex_desktop(&current) || !is_target_displayable(hwnd) {
+        return None;
+    }
+    Some(current)
+}
+
 /// Return the foreground codex-window, if any.
 pub fn foreground_codex_window() -> Option<WindowIdentity> {
     let candidates = collect_codex_candidates();
