@@ -220,6 +220,9 @@ pub fn run_app() -> Result<(), String> {
         let _ = SetTimer(hwnd, TIMER_COUNTDOWN, 1000, None);
         let mut message = MSG::default();
         while GetMessageW(&mut message, HWND::default(), 0, 0).as_bool() {
+            if settings_window::pre_translate_message(&message) {
+                continue;
+            }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }

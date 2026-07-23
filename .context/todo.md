@@ -1,6 +1,7 @@
-# CodexPlus 中文化与设置界面改造
+# CodexPlus 原生设置窗口优化
 
-- [x] 中文化托盘、提示、Overlay 与用户可见弹窗
-- [x] 重构浅色现代设置窗口
-- [x] 更新中文界面测试
-- [x] 运行完整验证与 Windows 实机验收
+- [ ] 重构设置窗口布局、字体、控件样式与 DPI 响应
+- [ ] 嵌入 Common Controls v6 / PerMonitorV2 清单并补齐窗口图标
+- [ ] 运行格式化、检查、测试、Clippy、release 构建和真实界面验收
+
+开始日期：2026-07-23
