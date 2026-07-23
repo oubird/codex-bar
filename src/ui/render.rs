@@ -5,11 +5,11 @@
 
 #![cfg(windows)]
 
-use crate::formatting::{format_countdown_compact, format_used_percent};
+use crate::formatting::{format_countdown_compact, format_used_percent, format_window_label};
 use crate::model::ViewState;
 
 /// Logical (DIP) size of the overlay — sized for `5h 42% · 1h18m   week 67% · 3d4h`.
-pub const OVERLAY_LOGICAL_WIDTH: i32 = 280;
+pub const OVERLAY_LOGICAL_WIDTH: i32 = 340;
 pub const OVERLAY_LOGICAL_HEIGHT: i32 = 28;
 
 #[derive(Debug, Clone)]
@@ -49,8 +49,8 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
     let tone = Tone::from_state(state);
     let Some(snap) = state.cached() else {
         let text = match state {
-            ViewState::Loading { .. } => "Codex usage · loading…",
-            ViewState::Error { .. } => "Codex usage · unavailable",
+            ViewState::Loading { .. } => "Codex 用量 · 加载中…",
+            ViewState::Error { .. } => "Codex 用量 · 暂不可用",
             ViewState::Ready { .. } | ViewState::Stale { .. } => {
                 unreachable!("state has a snapshot")
             }
@@ -64,8 +64,8 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
     let week_used = format_used_percent(&snap.weekly);
     let five_cd = format_countdown_compact(&snap.five_hour, now_unix);
     let week_cd = format_countdown_compact(&snap.weekly, now_unix);
-    let five_label = snap.five_hour.display_label();
-    let week_label = snap.weekly.display_label();
+    let five_label = format_window_label(&snap.five_hour);
+    let week_label = format_window_label(&snap.weekly);
     let stale = if state.stale_marker() {
         " !".to_string()
     } else {
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn no_snapshot_states_render_status_placeholders() {
         let loading = build_text(&ViewState::Loading { cached: None }, UsageSnapshot::now());
-        assert_eq!(loading.text, "Codex usage · loading…");
+        assert_eq!(loading.text, "Codex 用量 · 加载中…");
         assert_eq!(loading.tone, Tone::Stale);
 
         let unavailable = build_text(
@@ -148,7 +148,7 @@ mod tests {
             },
             UsageSnapshot::now(),
         );
-        assert_eq!(unavailable.text, "Codex usage · unavailable");
+        assert_eq!(unavailable.text, "Codex 用量 · 暂不可用");
         assert_eq!(unavailable.tone, Tone::Stale);
     }
 
@@ -158,7 +158,7 @@ mod tests {
             snapshot: snap(42.0, 67.0),
         };
         let row = build_text(&s, s.cached().unwrap().five_hour.resets_at_unix - 1800);
-        assert!(row.text.contains("5h 42%"));
-        assert!(row.text.contains("week 67%"));
+        assert!(row.text.contains("5小时 42%"));
+        assert!(row.text.contains("每周 67%"));
     }
 }

@@ -40,7 +40,7 @@ mod cross_module {
         let row = format_overlay_row(&state, now);
         let tooltip = format_tray_tooltip(&state, now);
         assert!(row.ends_with('!'));
-        assert!(tooltip.contains("Stale"));
+        assert!(tooltip.contains("数据已过期"));
     }
 
     #[test]
@@ -52,8 +52,8 @@ mod cross_module {
             },
             UsageSnapshot::now(),
         );
-        assert!(row.contains("5h 20%"));
-        assert!(row.contains("week 60%"));
+        assert!(row.contains("5小时 20%"));
+        assert!(row.contains("每周 60%"));
         assert!(!row.ends_with('!'));
     }
 }

@@ -52,8 +52,8 @@ pub fn run() -> i32 {
 
     let write_result = write_log(&log_path, &report);
     match write_result {
-        Ok(()) => show_summary(&log_path, "log written"),
-        Err(err) => show_summary(&log_path, &format!("failed to write log: {err}")),
+        Ok(()) => show_summary(&log_path, "诊断日志已生成"),
+        Err(err) => show_summary(&log_path, &format!("诊断日志写入失败：{err}")),
     }
     0
 }
@@ -290,7 +290,12 @@ fn report_state(report: &mut String, snapshot: Option<&crate::model::UsageSnapsh
             },
         },
     };
-    writeln!(report, "  {}", formatting::format_tray_tooltip(&state, now)).ok();
+    writeln!(
+        report,
+        "  {}",
+        formatting::format_diagnostic_summary(&state, now)
+    )
+    .ok();
 }
 
 fn report_target_window(report: &mut String) {
@@ -334,11 +339,11 @@ fn show_summary(log_path: &Path, status: &str) {
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
     let message = format!(
-        "CodexPlus diagnose finished.\n\nStatus: {status}\nLog: {}",
+        "CodexPlus 诊断已完成。\n\n状态：{status}\n日志：{}",
         log_path.display()
     );
     let wide_message: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-    let wide_title: Vec<u16> = "CodexPlus diagnose"
+    let wide_title: Vec<u16> = "CodexPlus 诊断"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();

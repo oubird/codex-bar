@@ -69,13 +69,13 @@ impl TrayIcon {
                 return;
             };
             let tooltip = format_tray_tooltip(state, crate::model::UsageSnapshot::now());
-            let summary = tooltip.lines().nth(1).unwrap_or("Loading Codex usage...");
+            let summary = tooltip.lines().nth(1).unwrap_or("正在加载 Codex 用量…");
             let summary_wide = wide(summary);
-            let refresh_wide = wide("Refresh now");
-            let overlay_wide = wide("Show title-bar overlay");
-            let settings_wide = wide("Settings...");
-            let diagnose_wide = wide("Run diagnose");
-            let exit_wide = wide("Exit");
+            let refresh_wide = wide("立即刷新");
+            let overlay_wide = wide("显示标题栏用量");
+            let settings_wide = wide("设置…");
+            let diagnose_wide = wide("运行诊断");
+            let exit_wide = wide("退出");
             let _ = AppendMenuW(
                 menu,
                 MF_STRING | MF_GRAYED,
