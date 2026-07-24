@@ -5,9 +5,8 @@
 
 #![cfg(windows)]
 
-use crate::formatting::{
-    format_reset_time_zh, format_usage_percent, format_window_label, DisplayOptions,
-};
+use crate::formatting::{format_window_segment, DisplayOptions};
+use crate::localization::texts;
 use crate::model::ViewState;
 
 /// Logical (DIP) size of the overlay — sized for `5小时 42% 1时18分   周限额 67% 3天4时`.
@@ -60,28 +59,22 @@ pub fn build_text(
 ) -> RenderedRow {
     let tone = Tone::from_state(state);
     let Some(snap) = state.cached() else {
+        let ui = texts(opts.language);
         let text = match state {
-            ViewState::Loading { .. } => "Codex 用量 · 加载中…",
-            ViewState::Error { .. } => "Codex 用量 · 暂不可用",
+            ViewState::Loading { .. } => ui.overlay.loading,
+            ViewState::Error { .. } => ui.overlay.unavailable,
             ViewState::Ready { .. } | ViewState::Stale { .. } => {
                 unreachable!("state has a snapshot")
             }
         };
         return RenderedRow {
-            text: text.into(),
+            text: text.to_string(),
             tone,
         };
     };
     let mut segments = snap
         .windows()
-        .map(|window| {
-            format!(
-                "{} {} {}",
-                format_window_label(window),
-                format_usage_percent(window, opts.usage),
-                format_reset_time_zh(window, now_unix, opts.reset_time, local_shift_seconds,),
-            )
-        })
+        .map(|window| format_window_segment(window, now_unix, opts, local_shift_seconds))
         .collect::<Vec<_>>();
     if state.stale_marker() {
         segments.push("!".to_string());
@@ -173,6 +166,33 @@ mod tests {
     }
 
     #[test]
+    fn english_placeholders_follow_active_language() {
+        let opts = DisplayOptions::new(
+            crate::settings::UsageDisplay::Remaining,
+            crate::settings::ResetTimeDisplay::Countdown,
+            crate::settings::Language::English,
+        );
+        let loading = build_text(
+            &ViewState::Loading { cached: None },
+            UsageSnapshot::now(),
+            opts,
+            0,
+        );
+        assert_eq!(loading.text, "Codex usage · Loading…");
+
+        let unavailable = build_text(
+            &ViewState::Error {
+                cached: None,
+                reason: "network",
+            },
+            UsageSnapshot::now(),
+            opts,
+            0,
+        );
+        assert_eq!(unavailable.text, "Codex usage · Unavailable");
+    }
+
+    #[test]
     fn weekly_only_row_omits_short_window() {
         let mut snapshot = snap(42.0, 67.0);
         snapshot.five_hour = None;
@@ -185,6 +205,25 @@ mod tests {
         assert!(row.text.contains("周限额 33%"));
         assert!(!row.text.contains("5小时"));
         assert!(!row.text.contains("剩余"));
+    }
+
+    #[test]
+    fn english_weekly_only_row_renders_english_label() {
+        let mut snapshot = snap(42.0, 67.0);
+        snapshot.five_hour = None;
+        let opts = DisplayOptions::new(
+            crate::settings::UsageDisplay::Remaining,
+            crate::settings::ResetTimeDisplay::Countdown,
+            crate::settings::Language::English,
+        );
+        let row = build_text(
+            &ViewState::Ready { snapshot },
+            UsageSnapshot::now(),
+            opts,
+            0,
+        );
+        assert!(row.text.contains("Weekly 33%"));
+        assert!(!row.text.contains("周限额"));
     }
 
     #[test]
@@ -216,6 +255,7 @@ mod tests {
         let opts = DisplayOptions::new(
             crate::settings::UsageDisplay::Used,
             crate::settings::ResetTimeDisplay::Countdown,
+            crate::settings::Language::SimplifiedChinese,
         );
         let row = build_text(
             &ViewState::Ready { snapshot },

@@ -51,9 +51,15 @@ pub fn run() -> i32 {
     report_target_window(&mut report);
 
     let write_result = write_log(&log_path, &report);
+    let language = settings::load().language;
+    let ui = crate::localization::texts(language).diagnose;
     match write_result {
-        Ok(()) => show_summary(&log_path, "诊断日志已生成"),
-        Err(err) => show_summary(&log_path, &format!("诊断日志写入失败：{err}")),
+        Ok(()) => show_summary(&log_path, ui.status_ok, &ui),
+        Err(err) => show_summary(
+            &log_path,
+            &format!("{}{}", ui.status_failed_prefix, err),
+            &ui,
+        ),
     }
     0
 }
@@ -324,20 +330,25 @@ fn report_target_window(report: &mut String) {
     }
 }
 
-fn show_summary(log_path: &Path, status: &str) {
+fn show_summary(log_path: &Path, status: &str, ui: &crate::localization::DiagnoseDialog) {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
-    let message = format!(
-        "CodexPlus 诊断已完成。\n\n状态：{status}\n日志：{}",
-        log_path.display()
-    );
+    let is_chinese = matches!(ui.log_label, "日志");
+    let message = if is_chinese {
+        format!(
+            "CodexPlus 诊断已完成。\n\n状态：{status}\n日志：{}",
+            log_path.display()
+        )
+    } else {
+        format!(
+            "CodexPlus diagnostics completed.\n\nStatus: {status}\nLog: {}",
+            log_path.display()
+        )
+    };
     let wide_message: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-    let wide_title: Vec<u16> = "CodexPlus 诊断"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide_title: Vec<u16> = ui.title.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         MessageBoxW(
             HWND(std::ptr::null_mut()),

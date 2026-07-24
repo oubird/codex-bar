@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::native;
 use crate::formatting::{format_tray_tooltip, DisplayOptions};
+use crate::localization::texts;
 use crate::model::{UsageSnapshot, ViewState};
 
 pub const WM_APP_TRAY: u32 = 0x8000 + 30;
@@ -68,16 +69,17 @@ impl TrayIcon {
             let Ok(menu) = CreatePopupMenu() else {
                 return;
             };
+            let ui = texts(display.language);
             let now = UsageSnapshot::now();
             let shift = native::local_shift_seconds(now);
             let tooltip = format_tray_tooltip(state, now, display, shift);
-            let summary = tooltip.lines().nth(1).unwrap_or("正在加载 Codex 用量…");
+            let summary = tooltip.lines().nth(1).unwrap_or(ui.tray.summary_loading);
             let summary_wide = wide(summary);
-            let refresh_wide = wide("立即刷新");
-            let overlay_wide = wide("显示标题栏用量");
-            let settings_wide = wide("设置…");
-            let diagnose_wide = wide("运行诊断");
-            let exit_wide = wide("退出");
+            let refresh_wide = wide(ui.tray.refresh);
+            let overlay_wide = wide(ui.tray.toggle_overlay);
+            let settings_wide = wide(ui.tray.settings);
+            let diagnose_wide = wide(ui.tray.diagnose);
+            let exit_wide = wide(ui.tray.exit);
             let _ = AppendMenuW(
                 menu,
                 MF_STRING | MF_GRAYED,

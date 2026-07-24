@@ -8,8 +8,9 @@
 //! stable. User-facing percentage can be switched to `used_percent` via
 //! [`DisplayOptions`].
 
+use crate::localization::{localize_reason, texts};
 use crate::model::{RateWindow, ViewState};
-use crate::settings::{ResetTimeDisplay, Settings, UsageDisplay};
+use crate::settings::{Language, ResetTimeDisplay, Settings, UsageDisplay};
 
 const ONE_MINUTE: i64 = 60;
 const ONE_HOUR: i64 = 60 * ONE_MINUTE;
@@ -21,11 +22,20 @@ const ONE_DAY: i64 = 24 * ONE_HOUR;
 pub struct DisplayOptions {
     pub usage: UsageDisplay,
     pub reset_time: ResetTimeDisplay,
+    pub language: Language,
 }
 
 impl DisplayOptions {
-    pub const fn new(usage: UsageDisplay, reset_time: ResetTimeDisplay) -> Self {
-        Self { usage, reset_time }
+    pub const fn new(
+        usage: UsageDisplay,
+        reset_time: ResetTimeDisplay,
+        language: Language,
+    ) -> Self {
+        Self {
+            usage,
+            reset_time,
+            language,
+        }
     }
 }
 
@@ -34,6 +44,7 @@ impl From<&Settings> for DisplayOptions {
         Self {
             usage: settings.usage_display,
             reset_time: settings.reset_time_display,
+            language: settings.language,
         }
     }
 }
@@ -59,10 +70,10 @@ pub fn format_usage_percent(window: &RateWindow, usage: UsageDisplay) -> String 
 }
 
 /// User-facing description word that pairs with `format_usage_percent`.
-pub fn format_usage_label(usage: UsageDisplay) -> &'static str {
+pub fn format_usage_label(language: Language, usage: UsageDisplay) -> &'static str {
     match usage {
-        UsageDisplay::Remaining => "剩余",
-        UsageDisplay::Used => "已用",
+        UsageDisplay::Remaining => texts(language).usage.remaining,
+        UsageDisplay::Used => texts(language).usage.used,
     }
 }
 
@@ -70,10 +81,14 @@ pub fn format_usage_label(usage: UsageDisplay) -> &'static str {
 ///
 /// The result is intentionally compact because it lives in the title-bar
 /// overlay. A wider variant is used for tooltips.
-pub fn format_countdown_compact(window: &RateWindow, now_unix: i64) -> String {
+pub fn format_countdown_compact(window: &RateWindow, now_unix: i64, language: Language) -> String {
     let secs = window.seconds_until_reset(now_unix);
+    let texts = texts(language);
     if secs == 0 {
-        return "现在".to_string();
+        return texts.countdown.now.to_string();
+    }
+    if language == Language::English {
+        return format_english_countdown(secs);
     }
     if secs >= ONE_DAY {
         let days = secs / ONE_DAY;
@@ -97,19 +112,43 @@ pub fn format_countdown_compact(window: &RateWindow, now_unix: i64) -> String {
     }
 }
 
+fn format_english_countdown(secs: i64) -> String {
+    if secs >= ONE_DAY {
+        let days = secs / ONE_DAY;
+        let hours = (secs % ONE_DAY) / ONE_HOUR;
+        if hours == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d{hours}h")
+        }
+    } else if secs >= ONE_HOUR {
+        let hours = secs / ONE_HOUR;
+        let minutes = (secs % ONE_HOUR) / ONE_MINUTE;
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{minutes}m")
+        }
+    } else {
+        let minutes = ((secs + 30) / ONE_MINUTE).max(1);
+        format!("{minutes}m")
+    }
+}
+
 /// User-facing reset-time string under the chosen display mode. The absolute
 /// variant consumes a precomputed local-time shift (seconds east of UTC) so
 /// this module stays free of Win32 or process-local side effects.
-pub fn format_reset_time_zh(
+pub fn format_reset_time(
     window: &RateWindow,
     now_unix: i64,
     mode: ResetTimeDisplay,
     local_shift_seconds: i64,
+    language: Language,
 ) -> String {
     match mode {
-        ResetTimeDisplay::Countdown => format_countdown_compact(window, now_unix),
+        ResetTimeDisplay::Countdown => format_countdown_compact(window, now_unix, language),
         ResetTimeDisplay::Absolute => {
-            format_absolute_reset_zh(window.resets_at_unix + local_shift_seconds)
+            format_absolute_reset(window.resets_at_unix + local_shift_seconds, language)
         }
     }
 }
@@ -147,33 +186,55 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (year, m, d)
 }
 
-fn format_absolute_reset_zh(local_unix: i64) -> String {
+fn format_absolute_reset(local_unix: i64, language: Language) -> String {
     let (_year, month, day, hour, minute) = civil_from_unix(local_unix);
-    format!("{month}月{day}日 {hour:02}:{minute:02}")
-}
-
-/// Compact Chinese label used by the user interface without changing the
-/// protocol/diagnostic labels stored in the domain model.
-pub fn format_window_label(window: &RateWindow) -> String {
-    use crate::model::WindowKind;
-
-    match window.kind {
-        WindowKind::FiveHour if window.window_seconds == crate::model::FIVE_HOUR_SECONDS => {
-            "5小时".to_string()
-        }
-        WindowKind::Weekly if window.window_seconds == crate::model::WEEKLY_SECONDS => {
-            "周限额".to_string()
-        }
-        WindowKind::FiveHour => format!("短周期 {}", format_duration_zh(window.window_seconds)),
-        WindowKind::Weekly => format!("长周期 {}", format_duration_zh(window.window_seconds)),
-        WindowKind::Other => format!("其他 {}", format_duration_zh(window.window_seconds)),
+    let texts = texts(language);
+    let month_name = texts.months[(month - 1) as usize];
+    if language == Language::English {
+        format!("{month_name} {day} {hour:02}:{minute:02}")
+    } else {
+        format!("{month}月{day}日 {hour:02}:{minute:02}")
     }
 }
 
-fn format_duration_zh(seconds: u64) -> String {
+/// Compact window label used by the user interface without changing the
+/// protocol/diagnostic labels stored in the domain model.
+pub fn format_window_label(window: &RateWindow, language: Language) -> String {
+    use crate::model::WindowKind;
+
+    let labels = texts(language).window;
+    match window.kind {
+        WindowKind::FiveHour if window.window_seconds == crate::model::FIVE_HOUR_SECONDS => {
+            labels.five_hour.to_string()
+        }
+        WindowKind::Weekly if window.window_seconds == crate::model::WEEKLY_SECONDS => {
+            labels.weekly.to_string()
+        }
+        WindowKind::FiveHour => format!(
+            "{}{}",
+            labels.short_window_prefix,
+            format_duration(window.window_seconds, language)
+        ),
+        WindowKind::Weekly => format!(
+            "{}{}",
+            labels.long_window_prefix,
+            format_duration(window.window_seconds, language)
+        ),
+        WindowKind::Other => format!(
+            "{}{}",
+            labels.other_window_prefix,
+            format_duration(window.window_seconds, language)
+        ),
+    }
+}
+
+fn format_duration(seconds: u64, language: Language) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;
+    if language == Language::English {
+        return format_english_duration(seconds);
+    }
     if seconds >= DAY {
         let days = seconds / DAY;
         let hours = (seconds % DAY) / HOUR;
@@ -194,6 +255,33 @@ fn format_duration_zh(seconds: u64) -> String {
         format!("{}分", seconds / MINUTE)
     } else {
         format!("{seconds}秒")
+    }
+}
+
+fn format_english_duration(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    if seconds >= DAY {
+        let days = seconds / DAY;
+        let hours = (seconds % DAY) / HOUR;
+        if hours == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d{hours}h")
+        }
+    } else if seconds >= HOUR {
+        let hours = seconds / HOUR;
+        let minutes = (seconds % HOUR) / MINUTE;
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{minutes}m")
+        }
+    } else if seconds >= MINUTE {
+        format!("{}m", seconds / MINUTE)
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -228,19 +316,34 @@ pub fn format_overlay_row(
     };
     let mut segments = snapshot
         .windows()
-        .map(|window| {
-            format!(
-                "{} {} {}",
-                format_window_label(window),
-                format_usage_percent(window, opts.usage),
-                format_reset_time_zh(window, now_unix, opts.reset_time, local_shift_seconds),
-            )
-        })
+        .map(|window| format_window_segment(window, now_unix, opts, local_shift_seconds))
         .collect::<Vec<_>>();
     if state.stale_marker() {
         segments.push("!".to_string());
     }
     segments.join("  ")
+}
+
+/// Single window segment shared between the title-bar overlay and tooltip so
+/// they never drift apart for the same snapshot.
+pub fn format_window_segment(
+    window: &RateWindow,
+    now_unix: i64,
+    opts: DisplayOptions,
+    local_shift_seconds: i64,
+) -> String {
+    format!(
+        "{} {} {}",
+        format_window_label(window, opts.language),
+        format_usage_percent(window, opts.usage),
+        format_reset_time(
+            window,
+            now_unix,
+            opts.reset_time,
+            local_shift_seconds,
+            opts.language,
+        ),
+    )
 }
 
 /// Tooltip-style multi-line string for the tray.
@@ -250,30 +353,37 @@ pub fn format_tray_tooltip(
     opts: DisplayOptions,
     local_shift_seconds: i64,
 ) -> String {
+    let ui = texts(opts.language);
     let mut lines = Vec::with_capacity(4);
     lines.push("CodexPlus".to_string());
     match state {
         ViewState::Loading { .. } => {
-            lines.push("正在加载 Codex 用量…".to_string());
+            lines.push(ui.tooltip.loading.to_string());
         }
         ViewState::Ready { snapshot } => {
             lines.extend(
                 snapshot
                     .windows()
-                    .map(|window| usage_line_zh(window, now_unix, opts, local_shift_seconds)),
+                    .map(|window| format_usage_line(window, now_unix, opts, local_shift_seconds)),
             );
-            lines.push(format!("更新于 {}", format_clock(now_unix)));
+            lines.push(format!(
+                "{}{}",
+                ui.tooltip.updated_prefix,
+                format_clock(now_unix)
+            ));
         }
         ViewState::Stale { snapshot, reason } => {
             lines.extend(
                 snapshot
                     .windows()
-                    .map(|window| usage_line_zh(window, now_unix, opts, local_shift_seconds)),
+                    .map(|window| format_usage_line(window, now_unix, opts, local_shift_seconds)),
             );
             lines.push(format!(
-                "数据已过期（{}）— 更新于 {}",
-                localize_reason(reason),
-                format_clock(now_unix)
+                "{}{}{}{}",
+                ui.tooltip.stale_prefix,
+                localize_reason(opts.language, reason),
+                ui.tooltip.stale_suffix,
+                format_clock(now_unix),
             ));
         }
         ViewState::Error {
@@ -283,19 +393,25 @@ pub fn format_tray_tooltip(
             lines.extend(
                 snapshot
                     .windows()
-                    .map(|window| usage_line_zh(window, now_unix, opts, local_shift_seconds)),
+                    .map(|window| format_usage_line(window, now_unix, opts, local_shift_seconds)),
             );
             lines.push(format!(
-                "发生错误（{}）— 更新于 {}",
-                localize_reason(reason),
-                format_clock(now_unix)
+                "{}{}{}{}",
+                ui.tooltip.error_prefix,
+                localize_reason(opts.language, reason),
+                ui.tooltip.error_suffix,
+                format_clock(now_unix),
             ));
         }
         ViewState::Error {
             cached: None,
             reason,
         } => {
-            lines.push(format!("错误：{}", localize_reason(reason)));
+            lines.push(format!(
+                "{}{}",
+                ui.tooltip.bare_error_prefix,
+                localize_reason(opts.language, reason),
+            ));
         }
     }
     let tooltip = lines.join("\n");
@@ -349,19 +465,27 @@ pub fn format_diagnostic_summary(state: &ViewState, now_unix: i64) -> String {
     truncate_utf16(&lines.join("\n"), 511)
 }
 
-fn usage_line_zh(
+fn format_usage_line(
     window: &RateWindow,
     now_unix: i64,
     opts: DisplayOptions,
     local_shift_seconds: i64,
 ) -> String {
-    let label = format_window_label(window);
+    let label = format_window_label(window, opts.language);
     let percent = format_usage_percent(window, opts.usage);
-    let time = format_reset_time_zh(window, now_unix, opts.reset_time, local_shift_seconds);
-    format!(
-        "{label}：{label_word} {percent}，{time}",
-        label_word = format_usage_label(opts.usage)
-    )
+    let time = format_reset_time(
+        window,
+        now_unix,
+        opts.reset_time,
+        local_shift_seconds,
+        opts.language,
+    );
+    let label_word = format_usage_label(opts.language, opts.usage);
+    if opts.language == Language::English {
+        format!("{label}: {percent} {label_word}, {time}")
+    } else {
+        format!("{label}：{label_word} {percent}，{time}")
+    }
 }
 
 fn usage_line_en(window: &RateWindow, now_unix: i64) -> String {
@@ -372,42 +496,7 @@ fn usage_line_en(window: &RateWindow, now_unix: i64) -> String {
 }
 
 fn format_countdown_en(window: &RateWindow, now_unix: i64) -> String {
-    let secs = window.seconds_until_reset(now_unix);
-    if secs == 0 {
-        return "now".to_string();
-    }
-    if secs >= ONE_DAY {
-        let days = secs / ONE_DAY;
-        let hours = (secs % ONE_DAY) / ONE_HOUR;
-        if hours == 0 {
-            format!("{days}d")
-        } else {
-            format!("{days}d{hours}h")
-        }
-    } else if secs >= ONE_HOUR {
-        let hours = secs / ONE_HOUR;
-        let minutes = (secs % ONE_HOUR) / ONE_MINUTE;
-        if minutes == 0 {
-            format!("{hours}h")
-        } else {
-            format!("{hours}h{minutes}m")
-        }
-    } else {
-        let minutes = ((secs + 30) / ONE_MINUTE).max(1);
-        format!("{minutes}m")
-    }
-}
-
-fn localize_reason(reason: &str) -> &str {
-    match reason {
-        "auth" => "认证失败",
-        "network" => "网络异常",
-        "proxy" => "代理异常",
-        "rate limited" => "请求受限",
-        "protocol" => "服务协议变化",
-        "error" => "未知错误",
-        _ => "未知错误",
-    }
+    format_english_countdown(window.seconds_until_reset(now_unix))
 }
 
 /// `%H:%M` local-time clock without pulling in chrono.
@@ -460,30 +549,56 @@ mod tests {
     }
 
     #[test]
-    fn countdown_formats_days_hours_minutes() {
+    fn countdown_formats_days_hours_minutes_zh() {
         let w = win(
             WindowKind::Weekly,
             30.0,
             WEEKLY_SECONDS,
             3 * ONE_DAY + 4 * ONE_HOUR,
         );
-        assert_eq!(format_countdown_compact(&w, 0), "3天4时");
+        assert_eq!(
+            format_countdown_compact(&w, 0, Language::SimplifiedChinese),
+            "3天4时"
+        );
+    }
+
+    #[test]
+    fn countdown_formats_days_hours_minutes_en() {
+        let w = win(
+            WindowKind::Weekly,
+            30.0,
+            WEEKLY_SECONDS,
+            3 * ONE_DAY + 4 * ONE_HOUR,
+        );
+        assert_eq!(format_countdown_compact(&w, 0, Language::English), "3d4h");
     }
 
     #[test]
     fn countdown_formats_sub_minute_as_one_minute() {
         let w = win(WindowKind::FiveHour, 99.0, FIVE_HOUR_SECONDS, 30);
-        assert_eq!(format_countdown_compact(&w, 0), "1分");
+        assert_eq!(
+            format_countdown_compact(&w, 0, Language::SimplifiedChinese),
+            "1分"
+        );
     }
 
     #[test]
-    fn countdown_past_reset_is_now() {
+    fn countdown_past_reset_is_now_zh() {
         let w = win(WindowKind::FiveHour, 100.0, FIVE_HOUR_SECONDS, -10);
-        assert_eq!(format_countdown_compact(&w, 0), "现在");
+        assert_eq!(
+            format_countdown_compact(&w, 0, Language::SimplifiedChinese),
+            "现在"
+        );
     }
 
     #[test]
-    fn overlay_row_contains_both_windows_and_stale_marker() {
+    fn countdown_past_reset_is_now_en() {
+        let w = win(WindowKind::FiveHour, 100.0, FIVE_HOUR_SECONDS, -10);
+        assert_eq!(format_countdown_compact(&w, 0, Language::English), "now");
+    }
+
+    #[test]
+    fn overlay_row_contains_both_windows_and_stale_marker_zh() {
         let s = snap(
             win(
                 WindowKind::FiveHour,
@@ -513,7 +628,33 @@ mod tests {
     }
 
     #[test]
-    fn only_present_window_is_rendered() {
+    fn overlay_row_renders_both_windows_en() {
+        let s = snap(
+            win(
+                WindowKind::FiveHour,
+                42.0,
+                FIVE_HOUR_SECONDS,
+                ONE_HOUR + 18 * ONE_MINUTE,
+            ),
+            win(
+                WindowKind::Weekly,
+                67.0,
+                WEEKLY_SECONDS,
+                3 * ONE_DAY + 4 * ONE_HOUR,
+            ),
+        );
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Countdown,
+            Language::English,
+        );
+        let row = format_overlay_row(&ViewState::Ready { snapshot: s }, 0, opts, 0);
+        assert!(row.contains("5h 58% 1h18m"));
+        assert!(row.contains("Weekly 33% 3d4h"));
+    }
+
+    #[test]
+    fn only_present_window_is_rendered_zh() {
         let weekly_only = UsageSnapshot {
             five_hour: None,
             weekly: Some(win(WindowKind::Weekly, 67.0, WEEKLY_SECONDS, 3 * ONE_DAY)),
@@ -522,13 +663,33 @@ mod tests {
         let state = ViewState::Ready {
             snapshot: weekly_only,
         };
-        let row = format_overlay_row(&state, 0, DisplayOptions::default(), 0);
-        let tooltip = format_tray_tooltip(&state, 0, DisplayOptions::default(), 0);
+        let opts = DisplayOptions::default();
+        let row = format_overlay_row(&state, 0, opts, 0);
+        let tooltip = format_tray_tooltip(&state, 0, opts, 0);
         assert!(row.contains("周限额 33%"));
         assert!(!row.contains("5小时"));
         assert!(!row.contains("剩余"));
         assert!(tooltip.contains("周限额：剩余 33%"));
         assert!(!tooltip.contains("5小时"));
+    }
+
+    #[test]
+    fn only_present_window_is_rendered_en() {
+        let weekly_only = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(win(WindowKind::Weekly, 67.0, WEEKLY_SECONDS, 3 * ONE_DAY)),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready {
+            snapshot: weekly_only,
+        };
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Countdown,
+            Language::English,
+        );
+        let tooltip = format_tray_tooltip(&state, 0, opts, 0);
+        assert!(tooltip.contains("Weekly: 33% remaining"));
     }
 
     #[test]
@@ -580,16 +741,55 @@ mod tests {
             win(WindowKind::FiveHour, 30.0, FIVE_HOUR_SECONDS, 600),
             win(WindowKind::Weekly, 20.0, WEEKLY_SECONDS, 3600),
         );
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Countdown,
+            Language::SimplifiedChinese,
+        );
         let tip = format_tray_tooltip(
             &ViewState::Error {
                 cached: Some(s),
                 reason: "network",
             },
             0,
-            DisplayOptions::default(),
+            opts,
             0,
         );
         assert!(tip.contains("网络异常"));
+    }
+
+    #[test]
+    fn tooltip_includes_english_error_reason() {
+        let s = snap(
+            win(WindowKind::FiveHour, 30.0, FIVE_HOUR_SECONDS, 600),
+            win(WindowKind::Weekly, 20.0, WEEKLY_SECONDS, 3600),
+        );
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Countdown,
+            Language::English,
+        );
+        let tip = format_tray_tooltip(
+            &ViewState::Error {
+                cached: Some(s),
+                reason: "network",
+            },
+            0,
+            opts,
+            0,
+        );
+        assert!(tip.contains("Network unavailable"));
+    }
+
+    #[test]
+    fn tooltip_includes_english_loading_message() {
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Countdown,
+            Language::English,
+        );
+        let tip = format_tray_tooltip(&ViewState::Loading { cached: None }, 0, opts, 0);
+        assert!(tip.contains("Loading Codex usage"));
     }
 
     #[test]
@@ -601,7 +801,11 @@ mod tests {
             fetched_at_unix: 0,
         };
         let state = ViewState::Ready { snapshot };
-        let opts = DisplayOptions::new(UsageDisplay::Used, ResetTimeDisplay::Countdown);
+        let opts = DisplayOptions::new(
+            UsageDisplay::Used,
+            ResetTimeDisplay::Countdown,
+            Language::SimplifiedChinese,
+        );
         let row = format_overlay_row(&state, 0, opts, 0);
         let tooltip = format_tray_tooltip(&state, 0, opts, 0);
         assert!(row.contains("周限额 25%"));
@@ -618,7 +822,27 @@ mod tests {
     }
 
     #[test]
-    fn absolute_reset_uses_supplied_local_shift() {
+    fn used_display_renders_english_overlay_and_tooltip() {
+        let weekly = win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, 5 * ONE_DAY);
+        let snapshot = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(weekly),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready { snapshot };
+        let opts = DisplayOptions::new(
+            UsageDisplay::Used,
+            ResetTimeDisplay::Countdown,
+            Language::English,
+        );
+        let row = format_overlay_row(&state, 0, opts, 0);
+        let tooltip = format_tray_tooltip(&state, 0, opts, 0);
+        assert!(row.contains("Weekly 25%"));
+        assert!(tooltip.contains("Weekly: 25% used"));
+    }
+
+    #[test]
+    fn absolute_reset_uses_supplied_local_shift_zh() {
         // Reset time fixed at 2026-07-30 11:34:00 UTC; with a fixed +08:00
         // shift the formatter should render `7月30日 19:34`. The shift is
         // also applied to the embedded numeric for the same `resets_at_unix`
@@ -632,12 +856,63 @@ mod tests {
             fetched_at_unix: 0,
         };
         let state = ViewState::Ready { snapshot };
-        let opts = DisplayOptions::new(UsageDisplay::Remaining, ResetTimeDisplay::Absolute);
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Absolute,
+            Language::SimplifiedChinese,
+        );
         let row = format_overlay_row(&state, secs - 3600, opts, 8 * 3600);
         let tooltip = format_tray_tooltip(&state, secs - 3600, opts, 8 * 3600);
         assert!(row.contains("7月30日 19:34"));
         assert!(tooltip.contains("7月30日 19:34"));
         assert!(!tooltip.contains(" 重置"));
+    }
+
+    #[test]
+    fn absolute_reset_uses_supplied_local_shift_en() {
+        let secs = 1_785_411_240_i64; // 2026-07-30 11:34:00 UTC
+        let weekly = win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, secs);
+        let snapshot = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(weekly),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready { snapshot };
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Absolute,
+            Language::English,
+        );
+        let row = format_overlay_row(&state, secs - 3600, opts, 8 * 3600);
+        let tooltip = format_tray_tooltip(&state, secs - 3600, opts, 8 * 3600);
+        assert!(row.contains("Jul 30 19:34"));
+        assert!(tooltip.contains("Jul 30 19:34"));
+    }
+
+    #[test]
+    fn absolute_reset_english_single_digit_day_has_no_extra_space() {
+        // 2026-07-03 11:34:00 UTC. With +08:00 local shift the absolute
+        // formatter should render `Jul 3 19:34` (single-digit day, single
+        // space) — not `Jul  3 19:34`.
+        let secs = 1_783_078_440_i64; // 2026-07-03 11:34:00 UTC
+        let weekly = win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, secs);
+        let snapshot = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(weekly),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready { snapshot };
+        let opts = DisplayOptions::new(
+            UsageDisplay::Remaining,
+            ResetTimeDisplay::Absolute,
+            Language::English,
+        );
+        let row = format_overlay_row(&state, secs - 3600, opts, 8 * 3600);
+        let tooltip = format_tray_tooltip(&state, secs - 3600, opts, 8 * 3600);
+        assert!(row.contains("Jul 3 19:34"));
+        assert!(!row.contains("Jul  3"));
+        assert!(tooltip.contains("Jul 3 19:34"));
+        assert!(!tooltip.contains("Jul  3"));
     }
 
     #[test]
@@ -673,8 +948,22 @@ mod tests {
     fn window_label_picks_canonical_chinese_names() {
         let five = win(WindowKind::FiveHour, 10.0, FIVE_HOUR_SECONDS, 600);
         let week = win(WindowKind::Weekly, 20.0, WEEKLY_SECONDS, 3600);
-        assert_eq!(format_window_label(&five), "5小时");
-        assert_eq!(format_window_label(&week), "周限额");
+        assert_eq!(
+            format_window_label(&five, Language::SimplifiedChinese),
+            "5小时"
+        );
+        assert_eq!(
+            format_window_label(&week, Language::SimplifiedChinese),
+            "周限额"
+        );
+    }
+
+    #[test]
+    fn window_label_picks_canonical_english_names() {
+        let five = win(WindowKind::FiveHour, 10.0, FIVE_HOUR_SECONDS, 600);
+        let week = win(WindowKind::Weekly, 20.0, WEEKLY_SECONDS, 3600);
+        assert_eq!(format_window_label(&five, Language::English), "5h");
+        assert_eq!(format_window_label(&week, Language::English), "Weekly");
     }
 
     #[test]

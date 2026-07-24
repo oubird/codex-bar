@@ -41,6 +41,19 @@ pub enum ResetTimeDisplay {
     Absolute,
 }
 
+/// Active UI language for the title-bar overlay, tray tooltip, tray menu, and
+/// settings window. Persisted together with the other display options so the
+/// same selection survives restart. Defaults to `SimplifiedChinese`; legacy
+/// `settings.json` files written before this field existed deserialize
+/// through `#[serde(default)]` so the previous setup is preserved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    #[default]
+    SimplifiedChinese,
+    English,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default = "default_schema_version")]
@@ -65,6 +78,8 @@ pub struct Settings {
     pub usage_display: UsageDisplay,
     #[serde(default)]
     pub reset_time_display: ResetTimeDisplay,
+    #[serde(default)]
+    pub language: Language,
 }
 
 const SCHEMA_VERSION: u32 = 2;
@@ -100,6 +115,7 @@ impl Default for Settings {
             custom_proxy_credential_target: None,
             usage_display: UsageDisplay::default(),
             reset_time_display: ResetTimeDisplay::default(),
+            language: Language::default(),
         }
     }
 }
@@ -115,6 +131,7 @@ pub struct SettingsPatch {
     pub custom_proxy_url: Option<String>,
     pub usage_display: Option<UsageDisplay>,
     pub reset_time_display: Option<ResetTimeDisplay>,
+    pub language: Option<Language>,
 }
 
 impl SettingsPatch {
@@ -144,6 +161,9 @@ impl SettingsPatch {
         }
         if let Some(value) = self.reset_time_display {
             settings.reset_time_display = value;
+        }
+        if let Some(value) = self.language {
+            settings.language = value;
         }
         settings.custom_proxy_credential_target = None;
         settings.schema_version = SCHEMA_VERSION;
@@ -219,6 +239,7 @@ mod tests {
         assert_eq!(settings.custom_proxy_url, None);
         assert_eq!(settings.usage_display, UsageDisplay::Remaining);
         assert_eq!(settings.reset_time_display, ResetTimeDisplay::Countdown);
+        assert_eq!(settings.language, Language::SimplifiedChinese);
     }
 
     #[test]
@@ -232,6 +253,44 @@ mod tests {
         .apply_to(&mut settings);
         assert_eq!(settings.usage_display, UsageDisplay::Used);
         assert_eq!(settings.reset_time_display, ResetTimeDisplay::Absolute);
+    }
+
+    #[test]
+    fn patch_applies_language() {
+        let mut settings = Settings::default();
+        SettingsPatch {
+            language: Some(Language::English),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+        assert_eq!(settings.language, Language::English);
+    }
+
+    #[test]
+    fn language_round_trips_via_serde() {
+        let mut settings = Settings::default();
+        SettingsPatch {
+            language: Some(Language::English),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+        let serialized = serde_json::to_string(&settings).expect("serialize");
+        assert!(serialized.contains("\"language\":\"english\""));
+        let parsed: Settings = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(parsed.language, Language::English);
+    }
+
+    #[test]
+    fn legacy_v2_settings_json_adopts_language_default() {
+        // The historical settings.json files written before this change had no
+        // language field. Deserializing that shape should still load and fall
+        // back to SimplifiedChinese without losing the other persisted values.
+        let raw = r#"{"schema_version":2,"overlay_enabled":false,"refresh_interval_secs":120,"proxy_mode":"direct","custom_proxy_url":null}"#;
+        let parsed: Settings = serde_json::from_str(raw).expect("deserialize");
+        assert_eq!(parsed.language, Language::SimplifiedChinese);
+        assert!(!parsed.overlay_enabled);
+        assert_eq!(parsed.refresh_interval_secs, 120);
+        assert_eq!(parsed.proxy_mode, ProxyMode::Direct);
     }
 
     #[test]
@@ -260,6 +319,7 @@ mod tests {
         let parsed: Settings = serde_json::from_str(raw).expect("deserialize");
         assert_eq!(parsed.usage_display, UsageDisplay::Remaining);
         assert_eq!(parsed.reset_time_display, ResetTimeDisplay::Countdown);
+        assert_eq!(parsed.language, Language::SimplifiedChinese);
     }
 
     #[test]
@@ -362,10 +422,12 @@ mod tests {
             custom_proxy_credential_target: Some("unexpected".to_owned()),
             usage_display: UsageDisplay::Used,
             reset_time_display: ResetTimeDisplay::Absolute,
+            language: Language::English,
         });
         assert!(settings.overlay_enabled);
         assert_eq!(settings.proxy_mode, ProxyMode::Environment);
         assert_eq!(settings.refresh_interval_secs, 300);
         assert_eq!(settings.custom_proxy_url, None);
+        assert_eq!(settings.language, Language::SimplifiedChinese);
     }
 }

@@ -8,6 +8,7 @@
 pub mod credentials;
 pub mod error;
 pub mod formatting;
+pub mod localization;
 pub mod model;
 pub mod provider;
 pub mod settings;

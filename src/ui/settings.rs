@@ -29,7 +29,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_CLIENTEDGE, WS_GROUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
-use crate::settings::{self, ProxyMode, ResetTimeDisplay, SettingsPatch, UsageDisplay};
+use crate::localization::texts;
+use crate::settings::{self, Language, ProxyMode, ResetTimeDisplay, SettingsPatch, UsageDisplay};
 
 pub const WM_APP_SETTINGS_CHANGED: u32 = 0x8000 + 41;
 
@@ -51,6 +52,9 @@ const ID_USAGE_USED: usize = 106;
 const ID_RESET_LABEL: usize = 107;
 const ID_RESET_COUNTDOWN: usize = 108;
 const ID_RESET_ABSOLUTE: usize = 109;
+const ID_LANGUAGE_LABEL: usize = 110;
+const ID_LANGUAGE_ZH_CN: usize = 111;
+const ID_LANGUAGE_ENGLISH: usize = 112;
 const ID_PROXY_ENV: usize = 201;
 const ID_PROXY_DIRECT: usize = 202;
 const ID_PROXY_CUSTOM: usize = 203;
@@ -58,7 +62,7 @@ const ID_PROXY_ADDRESS_LABEL: usize = 204;
 const ID_PROXY_ADDRESS: usize = 205;
 
 const CLIENT_WIDTH: i32 = 560;
-const CLIENT_HEIGHT: i32 = 678;
+const CLIENT_HEIGHT: i32 = 742;
 
 // Colors are stored in 0x00BBGGRR layout (Win32 COLORREF).
 const COLOR_WINDOW_BG: u32 = 0x00F4F5F7;
@@ -108,10 +112,10 @@ struct SettingsLayout {
 impl SettingsLayout {
     const fn new() -> Self {
         Self {
-            display_card: LogicalRect::new(20, 88, 520, 240),
-            proxy_card: LogicalRect::new(20, 344, 520, 244),
-            cancel_button: LogicalRect::new(350, 618, 88, 36),
-            save_button: LogicalRect::new(448, 618, 92, 36),
+            display_card: LogicalRect::new(20, 88, 520, 304),
+            proxy_card: LogicalRect::new(20, 408, 520, 244),
+            cancel_button: LogicalRect::new(350, 682, 88, 36),
+            save_button: LogicalRect::new(448, 682, 92, 36),
         }
     }
 }
@@ -119,6 +123,7 @@ impl SettingsLayout {
 struct SettingsWindowData {
     host: HWND,
     dpi: u32,
+    language: Language,
     font: HFONT,
     font_bold: HFONT,
     brush_window: HBRUSH,
@@ -128,10 +133,11 @@ struct SettingsWindowData {
 }
 
 impl SettingsWindowData {
-    unsafe fn create(host: HWND, dpi: u32) -> Self {
+    unsafe fn create(host: HWND, dpi: u32, language: Language) -> Self {
         Self {
             host,
             dpi,
+            language,
             font: create_ui_font(dpi, false),
             font_bold: create_ui_font(dpi, true),
             brush_window: CreateSolidBrush(COLORREF(COLOR_WINDOW_BG)),
@@ -191,6 +197,8 @@ pub fn open(host: HWND) {
         let (width, height) = outer_size_for_client(dpi, style);
         let instance = native::module_instance();
         let icon = native::load_app_icon();
+        let initial_settings = settings::load();
+        let initial_language = initial_settings.language;
 
         let class_name = wide(CLASS);
         let definition = WNDCLASSEXW {
@@ -204,8 +212,12 @@ pub fn open(host: HWND) {
         };
         let _ = RegisterClassExW(&definition);
 
-        let data = Box::into_raw(Box::new(SettingsWindowData::create(host, dpi)));
-        let title = wide("CodexPlus 设置");
+        let data = Box::into_raw(Box::new(SettingsWindowData::create(
+            host,
+            dpi,
+            initial_language,
+        )));
+        let title = wide(texts(initial_language).settings.title);
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
@@ -455,87 +467,111 @@ fn scaled_rect(rect: LogicalRect, dpi: u32) -> RECT {
 }
 
 unsafe fn build_controls(hwnd: HWND) {
-    label(hwnd, ID_PAGE_TITLE, "设置");
-    label(
-        hwnd,
-        ID_PAGE_SUBTITLE,
-        "管理标题栏用量显示、刷新频率和网络连接方式",
-    );
-    label(hwnd, ID_DISPLAY_TITLE, "显示与刷新");
+    let Some(data) = get_data(hwnd) else {
+        return;
+    };
+    let ui = texts(data.language).settings;
+    label(hwnd, ID_PAGE_TITLE, ui.page_title);
+    label(hwnd, ID_PAGE_SUBTITLE, ui.page_subtitle);
+    label(hwnd, ID_DISPLAY_TITLE, ui.display_card_title);
     button(
         hwnd,
-        "在 Codex 标题栏显示用量",
+        ui.overlay_checkbox,
         BS_AUTOCHECKBOX as u32,
         ID_OVERLAY,
         WS_TABSTOP.0,
     );
-    label(hwnd, ID_INTERVAL_LABEL, "刷新间隔（秒）");
+    label(hwnd, ID_INTERVAL_LABEL, ui.refresh_label);
     edit(hwnd, ID_INTERVAL, true);
 
-    label(hwnd, ID_USAGE_LABEL, "额度显示");
+    label(hwnd, ID_USAGE_LABEL, ui.usage_label);
     button(
         hwnd,
-        "显示剩余额度",
+        ui.usage_remaining,
         BS_AUTORADIOBUTTON as u32,
         ID_USAGE_REMAINING,
         WS_GROUP.0 | WS_TABSTOP.0,
     );
     button(
         hwnd,
-        "显示已用额度",
+        ui.usage_used,
         BS_AUTORADIOBUTTON as u32,
         ID_USAGE_USED,
         WS_TABSTOP.0,
     );
 
-    label(hwnd, ID_RESET_LABEL, "重置时间显示");
+    label(hwnd, ID_RESET_LABEL, ui.reset_label);
     button(
         hwnd,
-        "倒计时（如 5天14时）",
+        ui.reset_countdown,
         BS_AUTORADIOBUTTON as u32,
         ID_RESET_COUNTDOWN,
         WS_GROUP.0 | WS_TABSTOP.0,
     );
     button(
         hwnd,
-        "到期时间（如 7月30日 19:34）",
+        ui.reset_absolute,
         BS_AUTORADIOBUTTON as u32,
         ID_RESET_ABSOLUTE,
         WS_TABSTOP.0,
     );
 
-    label(hwnd, ID_PROXY_TITLE, "网络代理");
+    label(hwnd, ID_LANGUAGE_LABEL, ui.language_label);
     button(
         hwnd,
-        "使用系统环境代理",
+        ui.language_zh_cn,
+        BS_AUTORADIOBUTTON as u32,
+        ID_LANGUAGE_ZH_CN,
+        WS_GROUP.0 | WS_TABSTOP.0,
+    );
+    button(
+        hwnd,
+        ui.language_english,
+        BS_AUTORADIOBUTTON as u32,
+        ID_LANGUAGE_ENGLISH,
+        WS_TABSTOP.0,
+    );
+
+    label(hwnd, ID_PROXY_TITLE, ui.proxy_card_title);
+    button(
+        hwnd,
+        ui.proxy_env,
         BS_AUTORADIOBUTTON as u32,
         ID_PROXY_ENV,
         WS_GROUP.0 | WS_TABSTOP.0,
     );
     button(
         hwnd,
-        "强制直连（忽略所有代理）",
+        ui.proxy_direct,
         BS_AUTORADIOBUTTON as u32,
         ID_PROXY_DIRECT,
         WS_TABSTOP.0,
     );
     button(
         hwnd,
-        "使用自定义代理地址",
+        ui.proxy_custom,
         BS_AUTORADIOBUTTON as u32,
         ID_PROXY_CUSTOM,
         WS_TABSTOP.0,
     );
-    label(hwnd, ID_PROXY_ADDRESS_LABEL, "代理地址");
+    label(hwnd, ID_PROXY_ADDRESS_LABEL, ui.proxy_address_label);
     edit(hwnd, ID_PROXY_ADDRESS, false);
-    label(
-        hwnd,
-        ID_PROXY_HELP,
-        "代理地址保存在本机配置文件中，打开设置时会再次显示。",
-    );
+    label(hwnd, ID_PROXY_HELP, ui.proxy_help);
 
-    button(hwnd, "取消", BS_PUSHBUTTON as u32, ID_CANCEL, WS_TABSTOP.0);
-    button(hwnd, "保存", BS_DEFPUSHBUTTON as u32, ID_SAVE, WS_TABSTOP.0);
+    button(
+        hwnd,
+        ui.cancel,
+        BS_PUSHBUTTON as u32,
+        ID_CANCEL,
+        WS_TABSTOP.0,
+    );
+    button(
+        hwnd,
+        ui.save,
+        BS_DEFPUSHBUTTON as u32,
+        ID_SAVE,
+        WS_TABSTOP.0,
+    );
 
     let current = settings::load();
     check(hwnd, ID_OVERLAY, current.overlay_enabled);
@@ -556,6 +592,17 @@ unsafe fn build_controls(hwnd: HWND) {
     };
     check(hwnd, ID_RESET_COUNTDOWN, reset_id == ID_RESET_COUNTDOWN);
     check(hwnd, ID_RESET_ABSOLUTE, reset_id == ID_RESET_ABSOLUTE);
+
+    let language_id = match current.language {
+        Language::SimplifiedChinese => ID_LANGUAGE_ZH_CN,
+        Language::English => ID_LANGUAGE_ENGLISH,
+    };
+    check(hwnd, ID_LANGUAGE_ZH_CN, language_id == ID_LANGUAGE_ZH_CN);
+    check(
+        hwnd,
+        ID_LANGUAGE_ENGLISH,
+        language_id == ID_LANGUAGE_ENGLISH,
+    );
 
     match current.proxy_mode {
         ProxyMode::Environment => check(hwnd, ID_PROXY_ENV, true),
@@ -641,36 +688,55 @@ unsafe fn layout_controls(hwnd: HWND) {
 
     place(
         hwnd,
-        ID_PROXY_TITLE,
-        LogicalRect::new(40, 360, 480, 22),
+        ID_LANGUAGE_LABEL,
+        LogicalRect::new(40, 342, 480, 20),
         dpi,
     );
-    place(hwnd, ID_PROXY_ENV, LogicalRect::new(40, 392, 480, 24), dpi);
+    place(
+        hwnd,
+        ID_LANGUAGE_ZH_CN,
+        LogicalRect::new(40, 368, 220, 24),
+        dpi,
+    );
+    place(
+        hwnd,
+        ID_LANGUAGE_ENGLISH,
+        LogicalRect::new(280, 368, 240, 24),
+        dpi,
+    );
+
+    place(
+        hwnd,
+        ID_PROXY_TITLE,
+        LogicalRect::new(40, 424, 480, 22),
+        dpi,
+    );
+    place(hwnd, ID_PROXY_ENV, LogicalRect::new(40, 456, 480, 24), dpi);
     place(
         hwnd,
         ID_PROXY_DIRECT,
-        LogicalRect::new(40, 424, 480, 24),
+        LogicalRect::new(40, 488, 480, 24),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_CUSTOM,
-        LogicalRect::new(40, 456, 480, 24),
+        LogicalRect::new(40, 520, 480, 24),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_ADDRESS_LABEL,
-        LogicalRect::new(40, 497, 480, 20),
+        LogicalRect::new(40, 561, 480, 20),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_ADDRESS,
-        LogicalRect::new(40, 522, 480, 32),
+        LogicalRect::new(40, 586, 480, 32),
         dpi,
     );
-    place(hwnd, ID_PROXY_HELP, LogicalRect::new(40, 560, 480, 18), dpi);
+    place(hwnd, ID_PROXY_HELP, LogicalRect::new(40, 624, 480, 18), dpi);
 
     place(hwnd, ID_CANCEL, layout.cancel_button, dpi);
     place(hwnd, ID_SAVE, layout.save_button, dpi);
@@ -706,6 +772,9 @@ unsafe fn apply_fonts(hwnd: HWND) {
         ID_RESET_LABEL,
         ID_RESET_COUNTDOWN,
         ID_RESET_ABSOLUTE,
+        ID_LANGUAGE_LABEL,
+        ID_LANGUAGE_ZH_CN,
+        ID_LANGUAGE_ENGLISH,
         ID_PROXY_ENV,
         ID_PROXY_DIRECT,
         ID_PROXY_CUSTOM,
@@ -728,6 +797,8 @@ unsafe fn apply_themes(hwnd: HWND) {
         ID_USAGE_USED,
         ID_RESET_COUNTDOWN,
         ID_RESET_ABSOLUTE,
+        ID_LANGUAGE_ZH_CN,
+        ID_LANGUAGE_ENGLISH,
         ID_PROXY_ENV,
         ID_PROXY_DIRECT,
         ID_PROXY_CUSTOM,
@@ -757,6 +828,11 @@ unsafe fn save(hwnd: HWND) {
     } else {
         ResetTimeDisplay::Countdown
     };
+    let language = if checked(hwnd, ID_LANGUAGE_ENGLISH) {
+        Language::English
+    } else {
+        Language::SimplifiedChinese
+    };
     let mut settings_value = settings::load();
     let address = text(hwnd, ID_PROXY_ADDRESS);
     let trimmed_address = address.trim().to_string();
@@ -778,6 +854,7 @@ unsafe fn save(hwnd: HWND) {
         custom_proxy_url: Some(trimmed_address),
         usage_display: Some(usage_display),
         reset_time_display: Some(reset_time_display),
+        language: Some(language),
     }
     .apply_to(&mut settings_value);
     if settings::save(&settings_value).is_err() {
@@ -804,8 +881,11 @@ unsafe fn update_custom_enabled(hwnd: HWND) {
 }
 
 unsafe fn show_invalid_proxy_message(hwnd: HWND) {
-    let message = wide("请输入有效的 http:// 或 https:// 自定义代理地址。");
-    let title = wide("CodexPlus 设置");
+    let ui = get_data(hwnd)
+        .map(|data| texts(data.language).settings)
+        .unwrap_or_else(|| texts(Language::SimplifiedChinese).settings);
+    let message = wide(ui.invalid_proxy_message);
+    let title = wide(ui.invalid_proxy_title);
     let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
         hwnd,
         PCWSTR(message.as_ptr()),
@@ -950,10 +1030,10 @@ mod tests {
     #[test]
     fn scaling_preserves_expected_dimensions() {
         for (dpi, expected_width, expected_height) in [
-            (96, 560, 678),
-            (120, 700, 848),
-            (144, 840, 1017),
-            (192, 1120, 1356),
+            (96, 560, 742),
+            (120, 700, 928),
+            (144, 840, 1113),
+            (192, 1120, 1484),
         ] {
             assert_eq!(scale(CLIENT_WIDTH, dpi), expected_width);
             assert_eq!(scale(CLIENT_HEIGHT, dpi), expected_height);
