@@ -19,6 +19,28 @@ pub enum ProxyMode {
     Custom,
 }
 
+/// Whether the title-bar overlay shows the remaining quota (`剩余`) or the
+/// consumed quota (`已用`). Treated as ordinary UI configuration. Tone colour
+/// thresholds remain driven by the server-reported `used_percent`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageDisplay {
+    #[default]
+    Remaining,
+    Used,
+}
+
+/// How reset time is rendered in the title-bar overlay and tray tooltip.
+/// `Countdown` shows a relative `5天14时` style value; `Absolute` shows the
+/// local clock time of the next reset, formatted as `M月D日 HH:MM`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetTimeDisplay {
+    #[default]
+    Countdown,
+    Absolute,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default = "default_schema_version")]
@@ -39,6 +61,10 @@ pub struct Settings {
     /// change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_proxy_credential_target: Option<String>,
+    #[serde(default)]
+    pub usage_display: UsageDisplay,
+    #[serde(default)]
+    pub reset_time_display: ResetTimeDisplay,
 }
 
 const SCHEMA_VERSION: u32 = 2;
@@ -72,6 +98,8 @@ impl Default for Settings {
             proxy_mode: ProxyMode::Environment,
             custom_proxy_url: None,
             custom_proxy_credential_target: None,
+            usage_display: UsageDisplay::default(),
+            reset_time_display: ResetTimeDisplay::default(),
         }
     }
 }
@@ -85,6 +113,8 @@ pub struct SettingsPatch {
     /// surrounding whitespace before storage. An empty string clears the
     /// stored URL regardless of mode.
     pub custom_proxy_url: Option<String>,
+    pub usage_display: Option<UsageDisplay>,
+    pub reset_time_display: Option<ResetTimeDisplay>,
 }
 
 impl SettingsPatch {
@@ -108,6 +138,12 @@ impl SettingsPatch {
         }
         if settings.proxy_mode != ProxyMode::Custom {
             settings.custom_proxy_url = None;
+        }
+        if let Some(value) = self.usage_display {
+            settings.usage_display = value;
+        }
+        if let Some(value) = self.reset_time_display {
+            settings.reset_time_display = value;
         }
         settings.custom_proxy_credential_target = None;
         settings.schema_version = SCHEMA_VERSION;
@@ -181,6 +217,49 @@ mod tests {
         assert_eq!(settings.proxy_mode, ProxyMode::Environment);
         assert_eq!(settings.refresh_interval_secs, 300);
         assert_eq!(settings.custom_proxy_url, None);
+        assert_eq!(settings.usage_display, UsageDisplay::Remaining);
+        assert_eq!(settings.reset_time_display, ResetTimeDisplay::Countdown);
+    }
+
+    #[test]
+    fn patch_applies_usage_and_reset_displays() {
+        let mut settings = Settings::default();
+        SettingsPatch {
+            usage_display: Some(UsageDisplay::Used),
+            reset_time_display: Some(ResetTimeDisplay::Absolute),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+        assert_eq!(settings.usage_display, UsageDisplay::Used);
+        assert_eq!(settings.reset_time_display, ResetTimeDisplay::Absolute);
+    }
+
+    #[test]
+    fn usage_and_reset_displays_round_trip_via_serde() {
+        let mut settings = Settings::default();
+        SettingsPatch {
+            usage_display: Some(UsageDisplay::Used),
+            reset_time_display: Some(ResetTimeDisplay::Absolute),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+        let serialized = serde_json::to_string(&settings).expect("serialize");
+        assert!(serialized.contains("\"usage_display\":\"used\""));
+        assert!(serialized.contains("\"reset_time_display\":\"absolute\""));
+        let parsed: Settings = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(parsed.usage_display, UsageDisplay::Used);
+        assert_eq!(parsed.reset_time_display, ResetTimeDisplay::Absolute);
+    }
+
+    #[test]
+    fn legacy_v2_settings_json_adopts_defaults_for_new_fields() {
+        // The historical settings.json files written before this change had no
+        // usage_display / reset_time_display fields. Deserializing that shape
+        // should still load and fall back to the new defaults.
+        let raw = r#"{"schema_version":2,"overlay_enabled":true,"refresh_interval_secs":300,"proxy_mode":"environment","custom_proxy_url":null}"#;
+        let parsed: Settings = serde_json::from_str(raw).expect("deserialize");
+        assert_eq!(parsed.usage_display, UsageDisplay::Remaining);
+        assert_eq!(parsed.reset_time_display, ResetTimeDisplay::Countdown);
     }
 
     #[test]
@@ -281,6 +360,8 @@ mod tests {
             proxy_mode: ProxyMode::Custom,
             custom_proxy_url: Some("http://127.0.0.1:7890".to_string()),
             custom_proxy_credential_target: Some("unexpected".to_owned()),
+            usage_display: UsageDisplay::Used,
+            reset_time_display: ResetTimeDisplay::Absolute,
         });
         assert!(settings.overlay_enabled);
         assert_eq!(settings.proxy_mode, ProxyMode::Environment);

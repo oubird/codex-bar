@@ -2,15 +2,41 @@
 //!
 //! This module is pure: it never reaches into I/O, GUI, or Win32 APIs and is
 //! therefore fully exercised in unit tests. User-visible text shows the
-//! remaining percentage so the value matches what the user can still use;
-//! the technical diagnostic summary continues to render the server-reported
-//! `used_percent` so log search and historical triage remain stable.
+//! remaining percentage by default so the value matches what the user can
+//! still use; the technical diagnostic summary continues to render the
+//! server-reported `used_percent` so log search and historical triage remain
+//! stable. User-facing percentage can be switched to `used_percent` via
+//! [`DisplayOptions`].
 
 use crate::model::{RateWindow, ViewState};
+use crate::settings::{ResetTimeDisplay, Settings, UsageDisplay};
 
 const ONE_MINUTE: i64 = 60;
 const ONE_HOUR: i64 = 60 * ONE_MINUTE;
 const ONE_DAY: i64 = 24 * ONE_HOUR;
+
+/// Aggregated user-facing display options derived from [`Settings`]. Formatters
+/// pull everything from this struct so callers do not pass raw settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DisplayOptions {
+    pub usage: UsageDisplay,
+    pub reset_time: ResetTimeDisplay,
+}
+
+impl DisplayOptions {
+    pub const fn new(usage: UsageDisplay, reset_time: ResetTimeDisplay) -> Self {
+        Self { usage, reset_time }
+    }
+}
+
+impl From<&Settings> for DisplayOptions {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            usage: settings.usage_display,
+            reset_time: settings.reset_time_display,
+        }
+    }
+}
 
 pub fn format_used_percent(window: &RateWindow) -> String {
     format!("{}%", window.used_percent_rounded())
@@ -21,6 +47,23 @@ pub fn format_used_percent(window: &RateWindow) -> String {
 /// consistent with the headline colour thresholds derived from `used_percent`.
 pub fn format_remaining_percent(window: &RateWindow) -> String {
     format!("{}%", window.remaining_percent_rounded())
+}
+
+/// User-facing percentage respecting the configured [`UsageDisplay`]. Defaults
+/// to remaining so existing callers see the same string as before.
+pub fn format_usage_percent(window: &RateWindow, usage: UsageDisplay) -> String {
+    match usage {
+        UsageDisplay::Remaining => format_remaining_percent(window),
+        UsageDisplay::Used => format_used_percent(window),
+    }
+}
+
+/// User-facing description word that pairs with `format_usage_percent`.
+pub fn format_usage_label(usage: UsageDisplay) -> &'static str {
+    match usage {
+        UsageDisplay::Remaining => "剩余",
+        UsageDisplay::Used => "已用",
+    }
 }
 
 /// Human-readable countdown that matches CodexBar-style `1h18m` / `3d4h`.
@@ -52,6 +95,61 @@ pub fn format_countdown_compact(window: &RateWindow, now_unix: i64) -> String {
         let minutes = ((secs + 30) / ONE_MINUTE).max(1);
         format!("{minutes}分")
     }
+}
+
+/// User-facing reset-time string under the chosen display mode. The absolute
+/// variant consumes a precomputed local-time shift (seconds east of UTC) so
+/// this module stays free of Win32 or process-local side effects.
+pub fn format_reset_time_zh(
+    window: &RateWindow,
+    now_unix: i64,
+    mode: ResetTimeDisplay,
+    local_shift_seconds: i64,
+) -> String {
+    match mode {
+        ResetTimeDisplay::Countdown => format_countdown_compact(window, now_unix),
+        ResetTimeDisplay::Absolute => {
+            format_absolute_reset_zh(window.resets_at_unix + local_shift_seconds)
+        }
+    }
+}
+
+/// Convert a Unix timestamp into a civil (year, month, day, hour, minute) tuple
+/// using Howard Hinnant's `civil_from_days` algorithm. The result is in the
+/// caller-supplied local zone; this function never touches the OS clock.
+pub fn civil_from_unix(unix: i64) -> (i64, u32, u32, u32, u32) {
+    let z = unix / 86_400;
+    let secs_of_day = unix.rem_euclid(86_400);
+    let hours = (secs_of_day / 3600) as u32;
+    let minutes = ((secs_of_day % 3600) / 60) as u32;
+    let (year, month, day) = civil_from_days(z);
+    (year, month, day, hours, minutes)
+}
+
+/// Howard Hinnant's date algorithm. Computes the proleptic Gregorian
+/// `(year, month, day)` from a count of days since 1970-01-01. Negative inputs
+/// work for pre-1970 timestamps, matching the algorithm's reference behavior.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 {
+        (mp + 3) as u32
+    } else {
+        (mp - 9) as u32
+    };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year, m, d)
+}
+
+fn format_absolute_reset_zh(local_unix: i64) -> String {
+    let (_year, month, day, hour, minute) = civil_from_unix(local_unix);
+    format!("{month}月{day}日 {hour:02}:{minute:02}")
 }
 
 /// Compact Chinese label used by the user interface without changing the
@@ -119,7 +217,12 @@ pub fn seconds_until_countdown_change(window: &RateWindow, now_unix: i64) -> i64
 }
 
 /// Compact, single-row string used in the title-bar overlay.
-pub fn format_overlay_row(state: &ViewState, now_unix: i64) -> String {
+pub fn format_overlay_row(
+    state: &ViewState,
+    now_unix: i64,
+    opts: DisplayOptions,
+    local_shift_seconds: i64,
+) -> String {
     let Some(snapshot) = state.cached() else {
         return "--".to_string();
     };
@@ -129,8 +232,8 @@ pub fn format_overlay_row(state: &ViewState, now_unix: i64) -> String {
             format!(
                 "{} {} {}",
                 format_window_label(window),
-                format_remaining_percent(window),
-                format_countdown_compact(window, now_unix)
+                format_usage_percent(window, opts.usage),
+                format_reset_time_zh(window, now_unix, opts.reset_time, local_shift_seconds),
             )
         })
         .collect::<Vec<_>>();
@@ -141,7 +244,12 @@ pub fn format_overlay_row(state: &ViewState, now_unix: i64) -> String {
 }
 
 /// Tooltip-style multi-line string for the tray.
-pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
+pub fn format_tray_tooltip(
+    state: &ViewState,
+    now_unix: i64,
+    opts: DisplayOptions,
+    local_shift_seconds: i64,
+) -> String {
     let mut lines = Vec::with_capacity(4);
     lines.push("CodexPlus".to_string());
     match state {
@@ -152,7 +260,7 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             lines.extend(
                 snapshot
                     .windows()
-                    .map(|window| usage_line_zh(window, now_unix)),
+                    .map(|window| usage_line_zh(window, now_unix, opts, local_shift_seconds)),
             );
             lines.push(format!("更新于 {}", format_clock(now_unix)));
         }
@@ -160,7 +268,7 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             lines.extend(
                 snapshot
                     .windows()
-                    .map(|window| usage_line_zh(window, now_unix)),
+                    .map(|window| usage_line_zh(window, now_unix, opts, local_shift_seconds)),
             );
             lines.push(format!(
                 "数据已过期（{}）— 更新于 {}",
@@ -175,7 +283,7 @@ pub fn format_tray_tooltip(state: &ViewState, now_unix: i64) -> String {
             lines.extend(
                 snapshot
                     .windows()
-                    .map(|window| usage_line_zh(window, now_unix)),
+                    .map(|window| usage_line_zh(window, now_unix, opts, local_shift_seconds)),
             );
             lines.push(format!(
                 "发生错误（{}）— 更新于 {}",
@@ -241,11 +349,19 @@ pub fn format_diagnostic_summary(state: &ViewState, now_unix: i64) -> String {
     truncate_utf16(&lines.join("\n"), 511)
 }
 
-fn usage_line_zh(window: &RateWindow, now_unix: i64) -> String {
+fn usage_line_zh(
+    window: &RateWindow,
+    now_unix: i64,
+    opts: DisplayOptions,
+    local_shift_seconds: i64,
+) -> String {
     let label = format_window_label(window);
-    let remaining = format_remaining_percent(window);
-    let countdown = format_countdown_compact(window, now_unix);
-    format!("{label}：剩余 {remaining}，{countdown}后重置",)
+    let percent = format_usage_percent(window, opts.usage);
+    let time = format_reset_time_zh(window, now_unix, opts.reset_time, local_shift_seconds);
+    format!(
+        "{label}：{label_word} {percent}，{time}",
+        label_word = format_usage_label(opts.usage)
+    )
 }
 
 fn usage_line_en(window: &RateWindow, now_unix: i64) -> String {
@@ -388,6 +504,8 @@ mod tests {
                 reason: "network",
             },
             0,
+            DisplayOptions::default(),
+            0,
         );
         assert!(row.contains("5小时 58% 1时18分"));
         assert!(row.contains("周限额 33% 3天4时"));
@@ -404,8 +522,8 @@ mod tests {
         let state = ViewState::Ready {
             snapshot: weekly_only,
         };
-        let row = format_overlay_row(&state, 0);
-        let tooltip = format_tray_tooltip(&state, 0);
+        let row = format_overlay_row(&state, 0, DisplayOptions::default(), 0);
+        let tooltip = format_tray_tooltip(&state, 0, DisplayOptions::default(), 0);
         assert!(row.contains("周限额 33%"));
         assert!(!row.contains("5小时"));
         assert!(!row.contains("剩余"));
@@ -429,19 +547,29 @@ mod tests {
         let state = ViewState::Ready {
             snapshot: weekly_only,
         };
-        let tooltip = format_tray_tooltip(&state, 0);
+        let tooltip = format_tray_tooltip(&state, 0, DisplayOptions::default(), 0);
         assert!(tooltip.contains("周限额：剩余 75%"));
     }
 
     #[test]
     fn overlay_row_empty_when_no_cache() {
-        let row = format_overlay_row(&ViewState::Loading { cached: None }, 0);
+        let row = format_overlay_row(
+            &ViewState::Loading { cached: None },
+            0,
+            DisplayOptions::default(),
+            0,
+        );
         assert_eq!(row, "--");
     }
 
     #[test]
     fn tooltip_includes_chinese_loading_message() {
-        let tip = format_tray_tooltip(&ViewState::Loading { cached: None }, 0);
+        let tip = format_tray_tooltip(
+            &ViewState::Loading { cached: None },
+            0,
+            DisplayOptions::default(),
+            0,
+        );
         assert!(tip.contains("CodexPlus"));
         assert!(tip.contains("正在加载"));
     }
@@ -458,8 +586,71 @@ mod tests {
                 reason: "network",
             },
             0,
+            DisplayOptions::default(),
+            0,
         );
         assert!(tip.contains("网络异常"));
+    }
+
+    #[test]
+    fn used_display_renders_used_percent_in_overlay_and_tooltip() {
+        let weekly = win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, 5 * ONE_DAY);
+        let snapshot = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(weekly),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready { snapshot };
+        let opts = DisplayOptions::new(UsageDisplay::Used, ResetTimeDisplay::Countdown);
+        let row = format_overlay_row(&state, 0, opts, 0);
+        let tooltip = format_tray_tooltip(&state, 0, opts, 0);
+        assert!(row.contains("周限额 25%"));
+        assert!(!row.contains("周限额 75%"));
+        assert!(tooltip.contains("已用 25%"));
+        assert!(
+            !tooltip.contains("后重置"),
+            "tooltip should drop the 后重置 suffix: {tooltip}"
+        );
+        assert!(
+            !tooltip.contains(" 重置"),
+            "tooltip should drop the 重置 suffix: {tooltip}"
+        );
+    }
+
+    #[test]
+    fn absolute_reset_uses_supplied_local_shift() {
+        // Reset time fixed at 2026-07-30 11:34:00 UTC; with a fixed +08:00
+        // shift the formatter should render `7月30日 19:34`. The shift is
+        // also applied to the embedded numeric for the same `resets_at_unix`
+        // value, so the rest of the payload can keep using a far-future
+        // timestamp without affecting the assertion.
+        let secs = 1_785_411_240_i64; // 2026-07-30 11:34:00 UTC
+        let weekly = win(WindowKind::Weekly, 25.0, WEEKLY_SECONDS, secs);
+        let snapshot = UsageSnapshot {
+            five_hour: None,
+            weekly: Some(weekly),
+            fetched_at_unix: 0,
+        };
+        let state = ViewState::Ready { snapshot };
+        let opts = DisplayOptions::new(UsageDisplay::Remaining, ResetTimeDisplay::Absolute);
+        let row = format_overlay_row(&state, secs - 3600, opts, 8 * 3600);
+        let tooltip = format_tray_tooltip(&state, secs - 3600, opts, 8 * 3600);
+        assert!(row.contains("7月30日 19:34"));
+        assert!(tooltip.contains("7月30日 19:34"));
+        assert!(!tooltip.contains(" 重置"));
+    }
+
+    #[test]
+    fn civil_from_unix_handles_leap_day_and_month_boundaries() {
+        // 2024-02-29 12:00:00 UTC == 1_709_208_000
+        let (_year, month, day, hour, minute) = civil_from_unix(1_709_208_000);
+        assert_eq!((month, day, hour, minute), (2, 29, 12, 0));
+        // Month boundary crossing at 2024-03-01 00:00 UTC.
+        let (_year, month, day, _hour, _minute) = civil_from_unix(1_709_251_200);
+        assert_eq!((month, day), (3, 1));
+        // Year boundary 2025-01-01 00:00 UTC == 1_735_689_600
+        let (year, month, day, _hour, _minute) = civil_from_unix(1_735_689_600);
+        assert_eq!((year, month, day), (2025, 1, 1));
     }
 
     #[test]

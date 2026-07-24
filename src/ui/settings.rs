@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_CLIENTEDGE, WS_GROUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
-use crate::settings::{self, ProxyMode, SettingsPatch};
+use crate::settings::{self, ProxyMode, ResetTimeDisplay, SettingsPatch, UsageDisplay};
 
 pub const WM_APP_SETTINGS_CHANGED: u32 = 0x8000 + 41;
 
@@ -45,6 +45,12 @@ const ID_PROXY_HELP: usize = 14;
 const ID_OVERLAY: usize = 101;
 const ID_INTERVAL_LABEL: usize = 102;
 const ID_INTERVAL: usize = 103;
+const ID_USAGE_LABEL: usize = 104;
+const ID_USAGE_REMAINING: usize = 105;
+const ID_USAGE_USED: usize = 106;
+const ID_RESET_LABEL: usize = 107;
+const ID_RESET_COUNTDOWN: usize = 108;
+const ID_RESET_ABSOLUTE: usize = 109;
 const ID_PROXY_ENV: usize = 201;
 const ID_PROXY_DIRECT: usize = 202;
 const ID_PROXY_CUSTOM: usize = 203;
@@ -52,7 +58,7 @@ const ID_PROXY_ADDRESS_LABEL: usize = 204;
 const ID_PROXY_ADDRESS: usize = 205;
 
 const CLIENT_WIDTH: i32 = 560;
-const CLIENT_HEIGHT: i32 = 570;
+const CLIENT_HEIGHT: i32 = 678;
 
 // Colors are stored in 0x00BBGGRR layout (Win32 COLORREF).
 const COLOR_WINDOW_BG: u32 = 0x00F4F5F7;
@@ -102,10 +108,10 @@ struct SettingsLayout {
 impl SettingsLayout {
     const fn new() -> Self {
         Self {
-            display_card: LogicalRect::new(20, 88, 520, 132),
-            proxy_card: LogicalRect::new(20, 236, 520, 244),
-            cancel_button: LogicalRect::new(350, 510, 88, 36),
-            save_button: LogicalRect::new(448, 510, 92, 36),
+            display_card: LogicalRect::new(20, 88, 520, 240),
+            proxy_card: LogicalRect::new(20, 344, 520, 244),
+            cancel_button: LogicalRect::new(350, 618, 88, 36),
+            save_button: LogicalRect::new(448, 618, 92, 36),
         }
     }
 }
@@ -466,6 +472,38 @@ unsafe fn build_controls(hwnd: HWND) {
     label(hwnd, ID_INTERVAL_LABEL, "刷新间隔（秒）");
     edit(hwnd, ID_INTERVAL, true);
 
+    label(hwnd, ID_USAGE_LABEL, "额度显示");
+    button(
+        hwnd,
+        "显示剩余额度",
+        BS_AUTORADIOBUTTON as u32,
+        ID_USAGE_REMAINING,
+        WS_GROUP.0 | WS_TABSTOP.0,
+    );
+    button(
+        hwnd,
+        "显示已用额度",
+        BS_AUTORADIOBUTTON as u32,
+        ID_USAGE_USED,
+        WS_TABSTOP.0,
+    );
+
+    label(hwnd, ID_RESET_LABEL, "重置时间显示");
+    button(
+        hwnd,
+        "倒计时（如 5天14时）",
+        BS_AUTORADIOBUTTON as u32,
+        ID_RESET_COUNTDOWN,
+        WS_GROUP.0 | WS_TABSTOP.0,
+    );
+    button(
+        hwnd,
+        "到期时间（如 7月30日 19:34）",
+        BS_AUTORADIOBUTTON as u32,
+        ID_RESET_ABSOLUTE,
+        WS_TABSTOP.0,
+    );
+
     label(hwnd, ID_PROXY_TITLE, "网络代理");
     button(
         hwnd,
@@ -505,6 +543,20 @@ unsafe fn build_controls(hwnd: HWND) {
         child(hwnd, ID_INTERVAL),
         &current.refresh_interval_secs.to_string(),
     );
+    let usage_id = match current.usage_display {
+        UsageDisplay::Remaining => ID_USAGE_REMAINING,
+        UsageDisplay::Used => ID_USAGE_USED,
+    };
+    check(hwnd, ID_USAGE_REMAINING, usage_id == ID_USAGE_REMAINING);
+    check(hwnd, ID_USAGE_USED, usage_id == ID_USAGE_USED);
+
+    let reset_id = match current.reset_time_display {
+        ResetTimeDisplay::Countdown => ID_RESET_COUNTDOWN,
+        ResetTimeDisplay::Absolute => ID_RESET_ABSOLUTE,
+    };
+    check(hwnd, ID_RESET_COUNTDOWN, reset_id == ID_RESET_COUNTDOWN);
+    check(hwnd, ID_RESET_ABSOLUTE, reset_id == ID_RESET_ABSOLUTE);
+
     match current.proxy_mode {
         ProxyMode::Environment => check(hwnd, ID_PROXY_ENV, true),
         ProxyMode::Direct => check(hwnd, ID_PROXY_DIRECT, true),
@@ -551,36 +603,74 @@ unsafe fn layout_controls(hwnd: HWND) {
 
     place(
         hwnd,
-        ID_PROXY_TITLE,
-        LogicalRect::new(40, 252, 480, 22),
+        ID_USAGE_LABEL,
+        LogicalRect::new(40, 214, 480, 20),
         dpi,
     );
-    place(hwnd, ID_PROXY_ENV, LogicalRect::new(40, 284, 480, 24), dpi);
+    place(
+        hwnd,
+        ID_USAGE_REMAINING,
+        LogicalRect::new(40, 240, 220, 24),
+        dpi,
+    );
+    place(
+        hwnd,
+        ID_USAGE_USED,
+        LogicalRect::new(280, 240, 220, 24),
+        dpi,
+    );
+
+    place(
+        hwnd,
+        ID_RESET_LABEL,
+        LogicalRect::new(40, 278, 480, 20),
+        dpi,
+    );
+    place(
+        hwnd,
+        ID_RESET_COUNTDOWN,
+        LogicalRect::new(40, 304, 220, 24),
+        dpi,
+    );
+    place(
+        hwnd,
+        ID_RESET_ABSOLUTE,
+        LogicalRect::new(280, 304, 260, 24),
+        dpi,
+    );
+
+    place(
+        hwnd,
+        ID_PROXY_TITLE,
+        LogicalRect::new(40, 360, 480, 22),
+        dpi,
+    );
+    place(hwnd, ID_PROXY_ENV, LogicalRect::new(40, 392, 480, 24), dpi);
     place(
         hwnd,
         ID_PROXY_DIRECT,
-        LogicalRect::new(40, 316, 480, 24),
+        LogicalRect::new(40, 424, 480, 24),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_CUSTOM,
-        LogicalRect::new(40, 348, 480, 24),
+        LogicalRect::new(40, 456, 480, 24),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_ADDRESS_LABEL,
-        LogicalRect::new(40, 389, 480, 20),
+        LogicalRect::new(40, 497, 480, 20),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_ADDRESS,
-        LogicalRect::new(40, 414, 480, 32),
+        LogicalRect::new(40, 522, 480, 32),
         dpi,
     );
-    place(hwnd, ID_PROXY_HELP, LogicalRect::new(40, 452, 480, 18), dpi);
+    place(hwnd, ID_PROXY_HELP, LogicalRect::new(40, 560, 480, 18), dpi);
 
     place(hwnd, ID_CANCEL, layout.cancel_button, dpi);
     place(hwnd, ID_SAVE, layout.save_button, dpi);
@@ -610,6 +700,12 @@ unsafe fn apply_fonts(hwnd: HWND) {
         ID_OVERLAY,
         ID_INTERVAL_LABEL,
         ID_INTERVAL,
+        ID_USAGE_LABEL,
+        ID_USAGE_REMAINING,
+        ID_USAGE_USED,
+        ID_RESET_LABEL,
+        ID_RESET_COUNTDOWN,
+        ID_RESET_ABSOLUTE,
         ID_PROXY_ENV,
         ID_PROXY_DIRECT,
         ID_PROXY_CUSTOM,
@@ -628,6 +724,10 @@ unsafe fn apply_themes(hwnd: HWND) {
     for id in [
         ID_OVERLAY,
         ID_INTERVAL,
+        ID_USAGE_REMAINING,
+        ID_USAGE_USED,
+        ID_RESET_COUNTDOWN,
+        ID_RESET_ABSOLUTE,
         ID_PROXY_ENV,
         ID_PROXY_DIRECT,
         ID_PROXY_CUSTOM,
@@ -646,6 +746,16 @@ unsafe fn save(hwnd: HWND) {
         ProxyMode::Custom
     } else {
         ProxyMode::Environment
+    };
+    let usage_display = if checked(hwnd, ID_USAGE_USED) {
+        UsageDisplay::Used
+    } else {
+        UsageDisplay::Remaining
+    };
+    let reset_time_display = if checked(hwnd, ID_RESET_ABSOLUTE) {
+        ResetTimeDisplay::Absolute
+    } else {
+        ResetTimeDisplay::Countdown
     };
     let mut settings_value = settings::load();
     let address = text(hwnd, ID_PROXY_ADDRESS);
@@ -666,6 +776,8 @@ unsafe fn save(hwnd: HWND) {
         refresh_interval_secs: Some(interval),
         proxy_mode: Some(mode),
         custom_proxy_url: Some(trimmed_address),
+        usage_display: Some(usage_display),
+        reset_time_display: Some(reset_time_display),
     }
     .apply_to(&mut settings_value);
     if settings::save(&settings_value).is_err() {
@@ -838,10 +950,10 @@ mod tests {
     #[test]
     fn scaling_preserves_expected_dimensions() {
         for (dpi, expected_width, expected_height) in [
-            (96, 560, 570),
-            (120, 700, 713),
-            (144, 840, 855),
-            (192, 1120, 1140),
+            (96, 560, 678),
+            (120, 700, 848),
+            (144, 840, 1017),
+            (192, 1120, 1356),
         ] {
             assert_eq!(scale(CLIENT_WIDTH, dpi), expected_width);
             assert_eq!(scale(CLIENT_HEIGHT, dpi), expected_height);

@@ -26,8 +26,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::native;
 use super::render::{build_text, Tone, OVERLAY_LOGICAL_HEIGHT, OVERLAY_LOGICAL_WIDTH};
-use crate::formatting::format_tray_tooltip;
-use crate::model::ViewState;
+use crate::formatting::{format_tray_tooltip, DisplayOptions};
+use crate::model::{UsageSnapshot, ViewState};
 
 const OVERLAY_CLASS: &str = "CodexPlusOverlayWindow";
 const HTTRANSPARENT: isize = -1;
@@ -89,6 +89,7 @@ struct OverlayData {
     state: ViewState,
     visible: bool,
     owner: HWND,
+    display: DisplayOptions,
 }
 
 pub struct OverlayHandle {
@@ -113,6 +114,7 @@ impl OverlayHandle {
                 state: ViewState::Loading { cached: None },
                 visible: false,
                 owner: HWND::default(),
+                display: DisplayOptions::default(),
             });
             let data_ptr = Box::into_raw(data);
             let hwnd = CreateWindowExW(
@@ -134,18 +136,23 @@ impl OverlayHandle {
         }
     }
 
-    pub fn set_state(&self, state: ViewState) {
+    pub fn set_state(&self, state: ViewState, display: DisplayOptions) {
         unsafe {
             if let Some(data) = data_for(self.hwnd) {
                 data.state = state;
+                data.display = display;
             }
         }
     }
 
     pub fn tooltip(&self, now_unix: i64) -> String {
         unsafe {
+            let now = UsageSnapshot::now();
             data_for(self.hwnd)
-                .map(|d| format_tray_tooltip(&d.state, now_unix))
+                .map(|d| {
+                    let shift = native::local_shift_seconds(now);
+                    format_tray_tooltip(&d.state, now_unix, d.display, shift)
+                })
                 .unwrap_or_default()
         }
     }
@@ -279,7 +286,9 @@ unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), (
     let Some(data) = data_for(hwnd) else {
         return Err(());
     };
-    let row = build_text(&data.state, crate::model::UsageSnapshot::now());
+    let now = UsageSnapshot::now();
+    let shift = native::local_shift_seconds(now);
+    let row = build_text(&data.state, now, data.display, shift);
     let tone_rgb = tone_text_rgb(row.tone);
 
     let scale = TEXT_RENDER_SCALE;

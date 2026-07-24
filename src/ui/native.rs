@@ -5,8 +5,12 @@
 use std::sync::mpsc::Receiver;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Time::{
+    GetTimeZoneInformation, SystemTimeToTzSpecificLocalTime, TIME_ZONE_ID_INVALID,
+    TIME_ZONE_INFORMATION,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW,
@@ -22,6 +26,7 @@ use super::target_window;
 use super::tray::{
     TrayIcon, IDM_DIAGNOSE, IDM_EXIT, IDM_REFRESH, IDM_SETTINGS, IDM_TOGGLE_OVERLAY, WM_APP_TRAY,
 };
+use crate::formatting::DisplayOptions;
 use crate::settings::{self, SettingsPatch};
 
 const HOST_CLASS: &str = "CodexPlusHostWindow";
@@ -47,6 +52,94 @@ pub fn load_app_icon() -> HICON {
             LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default()
         })
     }
+}
+
+/// Difference between local time and UTC, expressed in seconds east of UTC.
+/// Uses `GetTimeZoneInformation` + `SystemTimeToTzSpecificLocalTime` so the
+/// result already factors in the currently-active DST rule. Returns `0` on
+/// any conversion failure so the caller falls back to rendering in UTC.
+pub fn local_shift_seconds(utc_unix: i64) -> i64 {
+    let utc_system = unix_to_system_time(utc_unix);
+    let mut tz = TIME_ZONE_INFORMATION::default();
+    unsafe {
+        // `GetTimeZoneInformation` only returns `TIME_ZONE_ID_INVALID` on
+        // failure; it returns `TIME_ZONE_ID_UNKNOWN`/`STANDARD`/`DAYLIGHT`
+        // (all non-zero) when the call succeeds. Treating any non-invalid
+        // result as success lets the populated `tz` struct reach
+        // `SystemTimeToTzSpecificLocalTime`, which itself re-applies the
+        // Bias/StandardBias/DaylightBias rules. Failing here returns 0 so
+        // the caller can fall back to a UTC render without mis-rendering.
+        let result = GetTimeZoneInformation(&mut tz);
+        if result == TIME_ZONE_ID_INVALID {
+            return 0;
+        }
+        let mut local = SYSTEMTIME::default();
+        if SystemTimeToTzSpecificLocalTime(None, &utc_system, &mut local).is_err() {
+            return 0;
+        }
+        let Some(local_unix) = system_time_to_unix(&local) else {
+            return 0;
+        };
+        local_unix.saturating_sub(utc_unix)
+    }
+}
+
+fn unix_to_system_time(unix: i64) -> SYSTEMTIME {
+    let days = unix.div_euclid(86_400);
+    let secs_of_day = unix.rem_euclid(86_400) as u32;
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+    SYSTEMTIME {
+        wYear: year as u16,
+        wMonth: month as u16,
+        wDay: day as u16,
+        wHour: hour as u16,
+        wMinute: minute as u16,
+        wSecond: second as u16,
+        wMilliseconds: 0,
+        wDayOfWeek: 0,
+    }
+}
+
+fn system_time_to_unix(value: &SYSTEMTIME) -> Option<i64> {
+    let year = value.wYear as i64;
+    let month = value.wMonth;
+    let day = value.wDay;
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400
+        + value.wHour as i64 * 3600
+        + value.wMinute as i64 * 60
+        + value.wSecond as i64;
+    Some(secs)
+}
+
+/// Howard Hinnant's date algorithm. Mirror of `formatting::civil_from_days`;
+/// duplicated here so this utility does not pull the formatting module into
+/// native code that is allowed to bind to Win32.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 {
+        (mp + 3) as u32
+    } else {
+        (mp - 9) as u32
+    };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year, m, d)
 }
 
 pub fn overlay_extended_styles_bits() -> u32 {
@@ -132,10 +225,11 @@ impl AppRuntime {
     fn new(hwnd: HWND) -> Result<Self, String> {
         let settings = settings::load();
         let cached = crate::storage::load();
+        let initial_display = DisplayOptions::from(&settings);
         let state = AppState::new(settings, cached);
         let overlay = OverlayHandle::create()?;
         let mut tray = TrayIcon::new(hwnd);
-        tray.add_or_update(&state.state);
+        tray.add_or_update(&state.state, initial_display);
         let (poll_sender, poll_receiver) = poll::start();
         let mut runtime = Self {
             state,
@@ -158,8 +252,10 @@ impl AppRuntime {
                 }
                 PollOutcome::Failure(error) => self.state.apply_failure(error),
             };
-            self.overlay.set_state(self.state.state.clone());
-            self.tray.add_or_update(&self.state.state);
+            self.overlay
+                .set_state(self.state.state.clone(), self.display_options());
+            self.tray
+                .add_or_update(&self.state.state, self.display_options());
             let delay_ms = match disposition {
                 RefreshDisposition::Success => self
                     .state
@@ -203,7 +299,12 @@ impl AppRuntime {
             self.state.settings.overlay_enabled,
             target_is_foreground,
         );
-        self.tray.add_or_update(&self.state.state);
+        self.tray
+            .add_or_update(&self.state.state, self.display_options());
+    }
+
+    fn display_options(&self) -> DisplayOptions {
+        DisplayOptions::from(&self.state.settings)
     }
 
     fn toggle_overlay(&mut self) {
@@ -278,8 +379,11 @@ unsafe extern "system" fn host_proc(
                     TIMER_RECONCILE => runtime.sync_overlay(),
                     TIMER_POLL => runtime.request_refresh(),
                     TIMER_COUNTDOWN => {
-                        runtime.overlay.set_state(runtime.state.state.clone());
-                        runtime.tray.add_or_update(&runtime.state.state);
+                        let display = DisplayOptions::from(&runtime.state.settings);
+                        runtime
+                            .overlay
+                            .set_state(runtime.state.state.clone(), display);
+                        runtime.tray.add_or_update(&runtime.state.state, display);
                     }
                     _ => {}
                 }
@@ -291,9 +395,11 @@ unsafe extern "system" fn host_proc(
             if let Some(runtime) = runtime_for(hwnd) {
                 // Right click opens the native menu. Tray commands reach WM_COMMAND.
                 if lparam.0 as u32 == windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP {
-                    runtime
-                        .tray
-                        .show_menu(runtime.state.settings.overlay_enabled, &runtime.state.state);
+                    runtime.tray.show_menu(
+                        runtime.state.settings.overlay_enabled,
+                        &runtime.state.state,
+                        DisplayOptions::from(&runtime.state.settings),
+                    );
                 }
             }
             LRESULT(0)
@@ -301,6 +407,10 @@ unsafe extern "system" fn host_proc(
         WM_APP_SETTINGS_CHANGED => {
             if let Some(runtime) = runtime_for(hwnd) {
                 runtime.state.settings = settings::load();
+                let display = DisplayOptions::from(&runtime.state.settings);
+                runtime
+                    .overlay
+                    .set_state(runtime.state.state.clone(), display);
                 runtime.sync_overlay();
                 runtime.request_refresh();
             }

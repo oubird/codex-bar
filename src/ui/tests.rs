@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod cross_module {
-    use crate::formatting::{format_overlay_row, format_tray_tooltip};
+    use crate::formatting::{format_overlay_row, format_tray_tooltip, DisplayOptions};
     use crate::model::{
         RateWindow, UsageSnapshot, ViewState, WindowKind, FIVE_HOUR_SECONDS, WEEKLY_SECONDS,
     };
@@ -37,8 +37,8 @@ mod cross_module {
             reason: "network",
         };
         let now = UsageSnapshot::now();
-        let row = format_overlay_row(&state, now);
-        let tooltip = format_tray_tooltip(&state, now);
+        let row = format_overlay_row(&state, now, DisplayOptions::default(), 0);
+        let tooltip = format_tray_tooltip(&state, now, DisplayOptions::default(), 0);
         assert!(row.ends_with('!'));
         assert!(tooltip.contains("数据已过期"));
     }
@@ -51,6 +51,8 @@ mod cross_module {
                 snapshot: s.clone(),
             },
             UsageSnapshot::now(),
+            DisplayOptions::default(),
+            0,
         );
         assert!(row.contains("5小时 80%"));
         assert!(row.contains("周限额 40%"));

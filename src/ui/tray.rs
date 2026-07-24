@@ -15,8 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::native;
-use crate::formatting::format_tray_tooltip;
-use crate::model::ViewState;
+use crate::formatting::{format_tray_tooltip, DisplayOptions};
+use crate::model::{UsageSnapshot, ViewState};
 
 pub const WM_APP_TRAY: u32 = 0x8000 + 30;
 pub const IDM_REFRESH: usize = 1001;
@@ -36,16 +36,15 @@ impl TrayIcon {
         Self { hwnd, added: false }
     }
 
-    pub fn add_or_update(&mut self, state: &ViewState) {
+    pub fn add_or_update(&mut self, state: &ViewState, display: DisplayOptions) {
         unsafe {
             let mut data = tray_data(self.hwnd);
             data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             data.uCallbackMessage = WM_APP_TRAY;
             data.hIcon = native::load_app_icon();
-            write_tip(
-                &mut data,
-                &format_tray_tooltip(state, crate::model::UsageSnapshot::now()),
-            );
+            let now = UsageSnapshot::now();
+            let shift = native::local_shift_seconds(now);
+            write_tip(&mut data, &format_tray_tooltip(state, now, display, shift));
             let operation = if self.added { NIM_MODIFY } else { NIM_ADD };
             if Shell_NotifyIconW(operation, &data).as_bool() {
                 self.added = true;
@@ -64,12 +63,14 @@ impl TrayIcon {
         self.added = false;
     }
 
-    pub fn show_menu(&self, overlay_enabled: bool, state: &ViewState) {
+    pub fn show_menu(&self, overlay_enabled: bool, state: &ViewState, display: DisplayOptions) {
         unsafe {
             let Ok(menu) = CreatePopupMenu() else {
                 return;
             };
-            let tooltip = format_tray_tooltip(state, crate::model::UsageSnapshot::now());
+            let now = UsageSnapshot::now();
+            let shift = native::local_shift_seconds(now);
+            let tooltip = format_tray_tooltip(state, now, display, shift);
             let summary = tooltip.lines().nth(1).unwrap_or("正在加载 Codex 用量…");
             let summary_wide = wide(summary);
             let refresh_wide = wide("立即刷新");

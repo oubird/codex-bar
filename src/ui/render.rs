@@ -5,11 +5,15 @@
 
 #![cfg(windows)]
 
-use crate::formatting::{format_countdown_compact, format_remaining_percent, format_window_label};
+use crate::formatting::{
+    format_reset_time_zh, format_usage_percent, format_window_label, DisplayOptions,
+};
 use crate::model::ViewState;
 
 /// Logical (DIP) size of the overlay — sized for `5小时 42% 1时18分   周限额 67% 3天4时`.
-pub const OVERLAY_LOGICAL_WIDTH: i32 = 340;
+/// Extended slightly so the absolute-mode reset time (`M月D日 HH:MM`) fits
+/// without clipping alongside both windows.
+pub const OVERLAY_LOGICAL_WIDTH: i32 = 400;
 pub const OVERLAY_LOGICAL_HEIGHT: i32 = 30;
 
 #[derive(Debug, Clone)]
@@ -48,7 +52,12 @@ impl Tone {
     }
 }
 
-pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
+pub fn build_text(
+    state: &ViewState,
+    now_unix: i64,
+    opts: DisplayOptions,
+    local_shift_seconds: i64,
+) -> RenderedRow {
     let tone = Tone::from_state(state);
     let Some(snap) = state.cached() else {
         let text = match state {
@@ -69,8 +78,8 @@ pub fn build_text(state: &ViewState, now_unix: i64) -> RenderedRow {
             format!(
                 "{} {} {}",
                 format_window_label(window),
-                format_remaining_percent(window),
-                format_countdown_compact(window, now_unix)
+                format_usage_percent(window, opts.usage),
+                format_reset_time_zh(window, now_unix, opts.reset_time, local_shift_seconds,),
             )
         })
         .collect::<Vec<_>>();
@@ -141,7 +150,12 @@ mod tests {
 
     #[test]
     fn no_snapshot_states_render_status_placeholders() {
-        let loading = build_text(&ViewState::Loading { cached: None }, UsageSnapshot::now());
+        let loading = build_text(
+            &ViewState::Loading { cached: None },
+            UsageSnapshot::now(),
+            DisplayOptions::default(),
+            0,
+        );
         assert_eq!(loading.text, "Codex 用量 · 加载中…");
         assert_eq!(loading.tone, Tone::Stale);
 
@@ -151,6 +165,8 @@ mod tests {
                 reason: "network",
             },
             UsageSnapshot::now(),
+            DisplayOptions::default(),
+            0,
         );
         assert_eq!(unavailable.text, "Codex 用量 · 暂不可用");
         assert_eq!(unavailable.tone, Tone::Stale);
@@ -160,7 +176,12 @@ mod tests {
     fn weekly_only_row_omits_short_window() {
         let mut snapshot = snap(42.0, 67.0);
         snapshot.five_hour = None;
-        let row = build_text(&ViewState::Ready { snapshot }, UsageSnapshot::now());
+        let row = build_text(
+            &ViewState::Ready { snapshot },
+            UsageSnapshot::now(),
+            DisplayOptions::default(),
+            0,
+        );
         assert!(row.text.contains("周限额 33%"));
         assert!(!row.text.contains("5小时"));
         assert!(!row.text.contains("剩余"));
@@ -180,9 +201,29 @@ mod tests {
                 .unwrap()
                 .resets_at_unix
                 - 1800,
+            DisplayOptions::default(),
+            0,
         );
         assert!(row.text.contains("5小时 58%"));
         assert!(row.text.contains("周限额 33%"));
         assert!(!row.text.contains("剩余"));
+    }
+
+    #[test]
+    fn overlay_row_uses_used_percent_when_configured() {
+        let mut snapshot = snap(42.0, 67.0);
+        snapshot.five_hour = None;
+        let opts = DisplayOptions::new(
+            crate::settings::UsageDisplay::Used,
+            crate::settings::ResetTimeDisplay::Countdown,
+        );
+        let row = build_text(
+            &ViewState::Ready { snapshot },
+            UsageSnapshot::now(),
+            opts,
+            0,
+        );
+        assert!(row.text.contains("周限额 67%"));
+        assert!(!row.text.contains("周限额 33%"));
     }
 }
