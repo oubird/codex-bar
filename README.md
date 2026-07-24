@@ -2,13 +2,22 @@
 
 > 常驻在 Windows 通知区域，在前台 Codex 窗口标题栏右侧以中文 overlay 显示 **5 小时与周限额的剩余额度** 与倒计时。
 
-| 项目 | 内容 |
-|---|---|
-| 平台 | Windows 10 / 11（x64） |
-| 形态 | 单 EXE、原生 Win32；无 WebView2、Node.js、Python 或 PowerShell 运行时 |
-| 数据 | 只读 Codex CLI 的 `auth.json`；仅请求固定 `wham/usage` endpoint |
-| 隐私 | Token、账号、代理 URL 与代理凭据不写入缓存、诊断报告或 UI |
-| 界面 | 用户可见界面（标题栏 overlay、托盘菜单/提示、设置窗口、错误状态）全部为简体中文；技术诊断日志保持英文便于检索 |
+<table>
+  <colgroup>
+    <col style="width: 18%">
+    <col style="width: 82%">
+  </colgroup>
+  <thead>
+    <tr><th align="left">项目</th><th align="left">内容</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>平台</td><td>Windows 10 / 11（x64）</td></tr>
+    <tr><td>形态</td><td>单 EXE、原生 Win32；无 WebView2、Node.js、Python 或 PowerShell 运行时</td></tr>
+    <tr><td>数据</td><td>只读 Codex CLI 的 <code>auth.json</code>；仅请求固定 <code>wham/usage</code> endpoint</td></tr>
+    <tr><td>隐私</td><td>Token、账号、代理 URL 与代理凭据不写入缓存、诊断报告或 UI</td></tr>
+    <tr><td>界面</td><td>用户可见界面（标题栏 overlay、托盘菜单/提示、设置窗口、错误状态）全部为简体中文；技术诊断日志保持英文便于检索</td></tr>
+  </tbody>
+</table>
 
 ## 效果预览
 
