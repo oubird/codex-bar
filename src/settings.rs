@@ -1,9 +1,10 @@
 //! Persistent non-secret application settings.
 //!
 //! Usage snapshots stay in `usage-cache.json`; settings use a separate file.
-//! Custom proxy credentials are intentionally not represented here. The UI
-//! stores them through Windows Credential Manager and this file keeps only a
-//! stable credential target name.
+//! Custom proxy addresses are stored here as plain text because the desktop
+//! configuration is intentionally user-visible through the settings window.
+//! Codex `auth.json` access tokens remain the only thing the app never
+//! persists, logs, or surfaces in errors.
 
 use std::fs;
 use std::io::{self, Write};
@@ -28,12 +29,19 @@ pub struct Settings {
     pub refresh_interval_secs: u32,
     #[serde(default)]
     pub proxy_mode: ProxyMode,
+    /// Persisted user-supplied proxy URL for `ProxyMode::Custom`. Treated as
+    /// ordinary configuration; never written to logs, errors, or diagnostics.
     #[serde(default)]
+    pub custom_proxy_url: Option<String>,
+    /// Legacy field kept for forward compatibility with earlier releases that
+    /// stored only a credential target name. Older `settings.json` files
+    /// still deserialize, but the value is cleared after the URL persistence
+    /// change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_proxy_credential_target: Option<String>,
 }
 
-const SCHEMA_VERSION: u32 = 1;
-pub const CUSTOM_PROXY_CREDENTIAL_TARGET: &str = "CodexPlus.ProxyUrl.v1";
+const SCHEMA_VERSION: u32 = 2;
 
 const fn default_schema_version() -> u32 {
     SCHEMA_VERSION
@@ -62,6 +70,7 @@ impl Default for Settings {
             overlay_enabled: true,
             refresh_interval_secs: default_refresh_interval(),
             proxy_mode: ProxyMode::Environment,
+            custom_proxy_url: None,
             custom_proxy_credential_target: None,
         }
     }
@@ -72,7 +81,10 @@ pub struct SettingsPatch {
     pub overlay_enabled: Option<bool>,
     pub refresh_interval_secs: Option<u32>,
     pub proxy_mode: Option<ProxyMode>,
-    pub custom_proxy_configured: Option<bool>,
+    /// Custom proxy URL the user entered in the settings window. Trimmed of
+    /// surrounding whitespace before storage. An empty string clears the
+    /// stored URL regardless of mode.
+    pub custom_proxy_url: Option<String>,
 }
 
 impl SettingsPatch {
@@ -83,16 +95,21 @@ impl SettingsPatch {
         if let Some(value) = self.refresh_interval_secs {
             settings.refresh_interval_secs = value.clamp(60, 3600);
         }
-        if let Some(value) = self.proxy_mode {
-            settings.proxy_mode = value;
+        if let Some(mode) = self.proxy_mode {
+            settings.proxy_mode = mode;
         }
-        if let Some(configured) = self.custom_proxy_configured {
-            settings.custom_proxy_credential_target =
-                configured.then(|| CUSTOM_PROXY_CREDENTIAL_TARGET.to_owned());
+        if let Some(value) = self.custom_proxy_url {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                settings.custom_proxy_url = None;
+            } else {
+                settings.custom_proxy_url = Some(trimmed.to_owned());
+            }
         }
         if settings.proxy_mode != ProxyMode::Custom {
-            settings.custom_proxy_credential_target = None;
+            settings.custom_proxy_url = None;
         }
+        settings.custom_proxy_credential_target = None;
         settings.schema_version = SCHEMA_VERSION;
     }
 }
@@ -120,8 +137,13 @@ fn normalize(mut settings: Settings) -> Settings {
     }
     settings.refresh_interval_secs = settings.refresh_interval_secs.clamp(60, 3600);
     if settings.proxy_mode != ProxyMode::Custom {
-        settings.custom_proxy_credential_target = None;
+        settings.custom_proxy_url = None;
+    } else if let Some(url) = settings.custom_proxy_url.as_deref() {
+        if !validate_custom_proxy_url(url) {
+            settings.custom_proxy_url = None;
+        }
     }
+    settings.custom_proxy_credential_target = None;
     settings
 }
 
@@ -139,84 +161,13 @@ pub fn save(settings: &Settings) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-#[cfg(windows)]
-pub fn save_custom_proxy_url(proxy_url: &str) -> Result<(), String> {
-    use windows::core::PWSTR;
-    use windows::Win32::Security::Credentials::{
-        CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-    };
-
-    let parsed = url::Url::parse(proxy_url).map_err(|_| "Invalid proxy URL.".to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err("Invalid proxy URL.".to_string());
+/// Returns `true` if `value` is a syntactically valid custom proxy URL using
+/// the `http` or `https` scheme and containing a host.
+pub fn validate_custom_proxy_url(value: &str) -> bool {
+    match url::Url::parse(value.trim()) {
+        Ok(parsed) => matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+        Err(_) => false,
     }
-
-    let mut target: Vec<u16> = CUSTOM_PROXY_CREDENTIAL_TARGET
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let mut username: Vec<u16> = "CodexPlus".encode_utf16().chain(Some(0)).collect();
-    let mut secret = proxy_url.as_bytes().to_vec();
-    let credential = CREDENTIALW {
-        Type: CRED_TYPE_GENERIC,
-        TargetName: PWSTR(target.as_mut_ptr()),
-        CredentialBlobSize: secret.len() as u32,
-        CredentialBlob: secret.as_mut_ptr(),
-        Persist: CRED_PERSIST_LOCAL_MACHINE,
-        UserName: PWSTR(username.as_mut_ptr()),
-        ..Default::default()
-    };
-    unsafe { CredWriteW(&credential, 0) }
-        .map_err(|_| "Could not store custom proxy securely.".to_string())
-}
-
-#[cfg(windows)]
-pub fn load_custom_proxy_url() -> Result<Option<String>, String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::Security::Credentials::{
-        CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
-    };
-
-    let target: Vec<u16> = CUSTOM_PROXY_CREDENTIAL_TARGET
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
-    let result = unsafe {
-        CredReadW(
-            PCWSTR(target.as_ptr()),
-            CRED_TYPE_GENERIC,
-            0,
-            &mut credential,
-        )
-    };
-    if result.is_err() {
-        return Ok(None);
-    }
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            (*credential).CredentialBlob,
-            (*credential).CredentialBlobSize as usize,
-        )
-    };
-    let value = std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| "Stored custom proxy is invalid.".to_string());
-    unsafe { CredFree(credential.cast()) };
-    value.map(Some)
-}
-
-#[cfg(windows)]
-pub fn delete_custom_proxy_url() -> Result<(), String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
-
-    let target: Vec<u16> = CUSTOM_PROXY_CREDENTIAL_TARGET
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0) }
-        .map_err(|_| "Could not remove custom proxy securely.".to_string())
 }
 
 #[cfg(test)]
@@ -229,6 +180,7 @@ mod tests {
         assert!(settings.overlay_enabled);
         assert_eq!(settings.proxy_mode, ProxyMode::Environment);
         assert_eq!(settings.refresh_interval_secs, 300);
+        assert_eq!(settings.custom_proxy_url, None);
     }
 
     #[test]
@@ -249,25 +201,75 @@ mod tests {
     }
 
     #[test]
-    fn switching_away_from_custom_clears_credential_metadata() {
+    fn custom_proxy_url_round_trips_when_valid() {
         let mut settings = Settings::default();
         SettingsPatch {
             proxy_mode: Some(ProxyMode::Custom),
-            custom_proxy_configured: Some(true),
+            custom_proxy_url: Some("  http://127.0.0.1:7890  ".to_string()),
             ..Default::default()
         }
         .apply_to(&mut settings);
         assert_eq!(
-            settings.custom_proxy_credential_target.as_deref(),
-            Some(CUSTOM_PROXY_CREDENTIAL_TARGET)
+            settings.custom_proxy_url.as_deref(),
+            Some("http://127.0.0.1:7890")
         );
+        let serialized = serde_json::to_string(&settings).expect("serialize");
+        assert!(serialized.contains("http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn switching_away_from_custom_clears_url() {
+        let mut settings = Settings::default();
+        SettingsPatch {
+            proxy_mode: Some(ProxyMode::Custom),
+            custom_proxy_url: Some("http://127.0.0.1:7890".to_string()),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+        assert!(settings.custom_proxy_url.is_some());
 
         SettingsPatch {
             proxy_mode: Some(ProxyMode::Direct),
             ..Default::default()
         }
         .apply_to(&mut settings);
-        assert_eq!(settings.custom_proxy_credential_target, None);
+        assert_eq!(settings.custom_proxy_url, None);
+    }
+
+    #[test]
+    fn empty_custom_proxy_url_clears_existing_value() {
+        let mut settings = Settings::default();
+        SettingsPatch {
+            proxy_mode: Some(ProxyMode::Custom),
+            custom_proxy_url: Some("http://127.0.0.1:7890".to_string()),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+
+        SettingsPatch {
+            proxy_mode: Some(ProxyMode::Custom),
+            custom_proxy_url: Some(String::new()),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+        assert_eq!(settings.custom_proxy_url, None);
+    }
+
+    #[test]
+    fn invalid_custom_proxy_url_is_dropped_on_load() {
+        let raw = r#"{"schema_version":2,"overlay_enabled":true,"refresh_interval_secs":300,"proxy_mode":"custom","custom_proxy_url":"not a url"}"#;
+        let settings: Settings = serde_json::from_str(raw).expect("deserialize");
+        let normalized = normalize(settings);
+        assert_eq!(normalized.custom_proxy_url, None);
+    }
+
+    #[test]
+    fn validate_custom_proxy_url_accepts_http_and_https() {
+        assert!(validate_custom_proxy_url("http://127.0.0.1:7890"));
+        assert!(validate_custom_proxy_url("https://example.test:443"));
+        assert!(!validate_custom_proxy_url("socks5://127.0.0.1:1080"));
+        assert!(!validate_custom_proxy_url(""));
+        assert!(!validate_custom_proxy_url("not a url"));
     }
 
     #[test]
@@ -276,26 +278,13 @@ mod tests {
             schema_version: SCHEMA_VERSION + 1,
             overlay_enabled: false,
             refresh_interval_secs: 60,
-            proxy_mode: ProxyMode::Direct,
+            proxy_mode: ProxyMode::Custom,
+            custom_proxy_url: Some("http://127.0.0.1:7890".to_string()),
             custom_proxy_credential_target: Some("unexpected".to_owned()),
         });
         assert!(settings.overlay_enabled);
         assert_eq!(settings.proxy_mode, ProxyMode::Environment);
         assert_eq!(settings.refresh_interval_secs, 300);
-    }
-
-    #[test]
-    fn custom_proxy_setting_never_contains_url_field() {
-        let mut settings = Settings::default();
-        SettingsPatch {
-            proxy_mode: Some(ProxyMode::Custom),
-            custom_proxy_configured: Some(true),
-            ..Default::default()
-        }
-        .apply_to(&mut settings);
-        let serialized = serde_json::to_string(&settings).expect("serialize");
-        assert!(serialized.contains(CUSTOM_PROXY_CREDENTIAL_TARGET));
-        assert!(!serialized.contains("127.0.0.1"));
-        assert!(!serialized.contains("password"));
+        assert_eq!(settings.custom_proxy_url, None);
     }
 }

@@ -82,8 +82,9 @@ impl ProxyConfiguration {
                 proxy: None,
             }),
             ProxyPolicy::CustomCredential => {
-                let url = crate::settings::load_custom_proxy_url()
-                    .map_err(|_| AppError::CustomProxyUnavailable)?
+                let url = crate::settings::load()
+                    .custom_proxy_url
+                    .filter(|value| !value.is_empty())
                     .ok_or(AppError::CustomProxyUnavailable)?;
                 Self::from_custom_url(&url)
             }

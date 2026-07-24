@@ -9,5 +9,6 @@ Windows 单 EXE 小插件，在 Codex 桌面应用标题栏最小化按钮左侧
 不抓网页、不读 `OPENAI_API_KEY`、不改登录态。
 最大化、全屏、被其他窗口覆盖时跟随 Codex 自动隐藏；离线保留 last-good；
 服务端只返回周限额时仍兼容显示。
+自定义代理地址保存在本机 `settings.json` 中，设置窗口会再次显示。
 
 Rust 编写，约 500 KB，MIT。

@@ -493,7 +493,7 @@ unsafe fn build_controls(hwnd: HWND) {
     label(
         hwnd,
         ID_PROXY_HELP,
-        "地址安全保存到 Windows 凭据管理器；保存后不再回显。",
+        "代理地址保存在本机配置文件中，打开设置时会再次显示。",
     );
 
     button(hwnd, "取消", BS_PUSHBUTTON as u32, ID_CANCEL, WS_TABSTOP.0);
@@ -509,6 +509,11 @@ unsafe fn build_controls(hwnd: HWND) {
         ProxyMode::Environment => check(hwnd, ID_PROXY_ENV, true),
         ProxyMode::Direct => check(hwnd, ID_PROXY_DIRECT, true),
         ProxyMode::Custom => check(hwnd, ID_PROXY_CUSTOM, true),
+    }
+    if let Some(url) = current.custom_proxy_url.as_deref() {
+        if !url.is_empty() {
+            set_text(child(hwnd, ID_PROXY_ADDRESS), url);
+        }
     }
 
     apply_fonts(hwnd);
@@ -643,13 +648,14 @@ unsafe fn save(hwnd: HWND) {
         ProxyMode::Environment
     };
     let mut settings_value = settings::load();
+    let address = text(hwnd, ID_PROXY_ADDRESS);
+    let trimmed_address = address.trim().to_string();
     if mode == ProxyMode::Custom {
-        let address = text(hwnd, ID_PROXY_ADDRESS);
-        if !address.trim().is_empty() && settings::save_custom_proxy_url(address.trim()).is_err() {
+        if trimmed_address.is_empty() {
             show_invalid_proxy_message(hwnd);
             return;
         }
-        if address.trim().is_empty() && settings_value.custom_proxy_credential_target.is_none() {
+        if !settings::validate_custom_proxy_url(&trimmed_address) {
             show_invalid_proxy_message(hwnd);
             return;
         }
@@ -659,7 +665,7 @@ unsafe fn save(hwnd: HWND) {
         overlay_enabled: Some(checked(hwnd, ID_OVERLAY)),
         refresh_interval_secs: Some(interval),
         proxy_mode: Some(mode),
-        custom_proxy_configured: (mode == ProxyMode::Custom).then_some(true),
+        custom_proxy_url: Some(trimmed_address),
     }
     .apply_to(&mut settings_value);
     if settings::save(&settings_value).is_err() {

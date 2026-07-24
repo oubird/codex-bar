@@ -50,7 +50,7 @@ cargo build --release
 Remove-Item "$env:LOCALAPPDATA\CodexPlus" -Recurse -Force
 ```
 
-这不会修改 Codex 的 `auth.json`。如果使用过自定义代理，其 URL 存在 Windows Credential Manager；可在其中删除 `CodexPlus.ProxyUrl.v1`。
+这不会修改 Codex 的 `auth.json`。如果之前在更老的版本中使用过自定义代理，它会保留在 Windows Credential Manager 中名为 `CodexPlus.ProxyUrl.v1` 的条目，可按需手动删除（与新版配置无关）。
 
 ## 设置与网络代理
 
@@ -60,7 +60,24 @@ Remove-Item "$env:LOCALAPPDATA\CodexPlus" -Recurse -Force
 %LOCALAPPDATA%\CodexPlus\settings.json
 ```
 
-该文件保存 overlay 开关、刷新周期和代理模式。用量快照单独保存至 `usage-cache.json`。自定义代理 URL（可包含用户名和密码）不会写入 JSON，而是使用 Windows Credential Manager 中的 `CodexPlus.ProxyUrl.v1` 凭据。
+该文件保存 overlay 开关、刷新周期、代理模式和自定义代理地址。用量快照单独保存至 `usage-cache.json`。代理地址是桌面本机配置，会被明文持久化到 `settings.json`，设置窗口重新打开时会再次显示。
+
+### 代理模式
+
+在 **设置** 中选择：
+
+1. **使用环境代理**：读取启动进程的环境变量，优先级为 `CODEXPLUS_HTTPS_PROXY` → `HTTPS_PROXY` → `https_proxy` → `HTTP_PROXY` → `http_proxy` → 直连。空值会跳过。
+2. **强制直连**：忽略所有代理环境变量，直接连接固定 endpoint。
+3. **使用自定义代理地址**：在地址框输入 `http://` 或 `https://` 代理地址后保存；地址会显示在配置文件中，运行时原样使用。
+
+环境代理示例：
+
+```powershell
+$env:CODEXPLUS_HTTPS_PROXY = 'http://127.0.0.1:7890'
+.\target\release\codexplus.exe
+```
+
+代理仅影响固定的 `wham/usage` 请求；不会改变 endpoint、不会修改 Codex 登录状态，也不会把地址或凭据写入诊断报告或错误文案。
 
 ### 代理模式
 
@@ -135,10 +152,11 @@ Windows 手动验收建议：
 |---|---|
 | `auth.json` access token | 只用于请求 Authorization header；不进缓存、日志或错误文案 |
 | account ID | 仅用于请求头；不落本地 |
-| 自定义代理 URL | 仅保存在 Windows Credential Manager；不进 settings、缓存或诊断日志 |
+| 自定义代理 URL | 作为桌面配置保存在 `settings.json`，可随时修改；不进日志、缓存或诊断报告 |
 | API 响应原文 | 不保存 |
 | Endpoint | 固定为 `https://chatgpt.com/backend-api/wham/usage`；不读取自定义 base URL，不跟随重定向 |
 | 缓存 schema | 当前 v2，向前兼容 v1；无法识别的快照会被忽略，不会写入错误数据 |
+| 设置 schema | v2（自定义代理地址持久化），旧 v1 仍能读取，但回显前会按 schema_version 安全回退 |
 
 ## 当前范围
 
