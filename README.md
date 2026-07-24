@@ -154,6 +154,8 @@ $env:CODEXPLUS_TARGET_BIN = 'codex.exe,chatgpt.exe'
 
 ## 构建与验证
 
+开发构建、测试、release profile 缓存：
+
 ```powershell
 cargo fmt
 cargo fmt --check
@@ -162,7 +164,31 @@ cargo test --lib
 cargo test --release --lib
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
+.\target\release\codexplus.exe
 ```
+
+### 目录职责
+
+| 目录 | 角色 | 由谁管理 |
+|---|---|---|
+| `target/debug/` | dev / test profile 编译缓存（`.fingerprint`、`build`、`deps`、`incremental` 等） | Cargo，可 `cargo clean` 一次性回收 |
+| `target/release/` | release profile 编译缓存 + `codexplus.exe` 本机构建产物 | Cargo；不是最终发布目录 |
+| `release/` | 仅由 `scripts/package-release.ps1` 写入；脚本每次运行都会整体重建，最终只含一个 `codexplus.exe` | 发布脚本；`.gitignore` 忽略；不适合保存人工文件 |
+
+### 打包最终可交付物
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-release.ps1
+```
+
+脚本默认先执行 `cargo build --release --locked`，然后把构建产物复制为单个可执行文件：
+
+```text
+release/
+└─ codexplus.exe
+```
+
+`release/` 是脚本独占管理的生成目录，每次运行都会被整体覆盖；不要把需要长期保留的人工文件放在这里。脚本不再生成版本子目录、ZIP 包或 README 拷贝；版本号由 Git tag / Release 标题表达，GitHub 与 Gitee Release 只需上传 `release/codexplus.exe`。如果 EXE 已被外部流程构建并确认是当前源码产物，可以加 `-SkipBuild` 跳过 `cargo build`。
 
 Windows 手动验收建议：
 

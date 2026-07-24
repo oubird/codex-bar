@@ -18,5 +18,8 @@ Cargo.lock.bak
 *.pdb
 
 # Distributables (built per release)
+/release/
+
+# Legacy local output, no longer produced
 /dist/
 

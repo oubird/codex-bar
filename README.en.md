@@ -153,6 +153,8 @@ The report records credential file presence, cache load result, **proxy source l
 
 ## Build and verification
 
+Development builds, tests, and release-profile cache:
+
 ```powershell
 cargo fmt
 cargo fmt --check
@@ -161,7 +163,31 @@ cargo test --lib
 cargo test --release --lib
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
+.\target\release\codexplus.exe
 ```
+
+### Directory roles
+
+| Directory | Role | Managed by |
+|---|---|---|
+| `target/debug/` | dev / test profile cache (`.fingerprint`, `build`, `deps`, `incremental`, etc.) | Cargo — reclaim with `cargo clean` |
+| `target/release/` | release-profile cache and the locally-built `codexplus.exe`; **not** a distributable directory | Cargo |
+| `release/` | written only by `scripts/package-release.ps1`; the script rebuilds it on every run and keeps a single `codexplus.exe` | The packaging script — `.gitignore` skips it; do not store hand-written files here |
+
+### Pack the distributable
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-release.ps1
+```
+
+The script first runs `cargo build --release --locked`, then copies the resulting executable into:
+
+```text
+release/
+└─ codexplus.exe
+```
+
+`release/` is an output directory fully owned by the script; every run replaces its previous contents, so do not keep any hand-written files there. The script does not produce a per-version subdirectory, zip, or README copy. Version numbers live in the Git tag and Release title; the only asset uploaded to GitHub / Gitee Releases is `release/codexplus.exe`. Pass `-SkipBuild` if the executable was produced by an external pipeline and you can confirm it matches the current source tree.
 
 Windows manual acceptance checklist:
 

@@ -1,63 +1,47 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Package the CodexPlus Windows release into a side-by-side folder and zip.
+    Build the CodexPlus release executable and copy it as the only file
+    under the project root's release/ directory.
 
 .DESCRIPTION
-    After `cargo build --release` has produced target/release/codexplus.exe, this
-    script copies that binary together with the project README.md into a
-    per-version staging folder under target/release/ and additionally produces
-    a matching zip archive. The result mirrors the layout expected by GitHub /
-    Gitee Releases:
+    This script owns a single responsibility: produce the per-commit
+    distributable for CodexPlus on Windows x64. It is intentionally simple.
 
-        target/release/
-            codexplus-vX.Y.Z-windows-x64/
-                codexplus.exe
-                README.md
-            codexplus-vX.Y.Z-windows-x64.zip
+    * When -SkipBuild is not supplied, `cargo build --release --locked`
+      runs first so the artifact always matches the current source tree.
+    * The resulting target/release/codexplus.exe is copied into the fixed
+      <repo>/release/ directory as codexplus.exe. The directory itself is
+      recreated every run, so its previous contents are always overwritten.
+    * The script does not zip anything, does not embed README.md in the
+      archive, and does not expose an OutputDir / Version parameter. Git
+      tag or Release title carries the version number; only the EXE is
+      uploaded to GitHub / Gitee Release assets.
 
-    Both artifacts contain the same files; the folder is the unzipped view of
-    the archive so either form can be uploaded.
-
-.PARAMETER Version
-    Release version. Accepts both `v0.2.0` and `0.2.0`; the leading `v` is
-    stripped when naming the staging folder. Required.
-
-.PARAMETER ExePath
-    Override the source executable. Defaults to `<repo>/target/release/codexplus.exe`.
-
-.PARAMETER ReadmePath
-    Override the README source. Defaults to `<repo>/README.md`.
-
-.PARAMETER OutputDir
-    Override the parent output directory. Defaults to `<repo>/target/release`.
-
-.PARAMETER RepoRoot
-    Override the repository root. Defaults to the script's parent directory.
+.PARAMETER SkipBuild
+    Skip `cargo build --release --locked`. Use only when the calling
+    pipeline has already produced a known-good target/release/codexplus.exe.
 
 .EXAMPLE
-    .\scripts\package-release.ps1 -Version v0.2.0
+    .\scripts\package-release.ps1
 
 .EXAMPLE
-    .\scripts\package-release.ps1 -Version 0.2.1 -ExePath target\release\codexplus.exe
+    .\scripts\package-release.ps1 -SkipBuild
 #>
 
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$Version,
-
-    [string]$ExePath,
-    [string]$ReadmePath,
-    [string]$OutputDir,
-    [string]$RepoRoot
-)
+param([switch]$SkipBuild)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (-not $RepoRoot) {
-    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-}
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$SourceExe = Join-Path $RepoRoot "target\release\codexplus.exe"
+$ReleaseDir = Join-Path $RepoRoot "release"
+$ReleaseExe = Join-Path $ReleaseDir "codexplus.exe"
+
+# ----------------------------------------------------------------------------
+# Build helpers
+# ----------------------------------------------------------------------------
 
 function Require-File {
     param(
@@ -70,63 +54,74 @@ function Require-File {
     }
 }
 
-if (-not $ExePath) {
-    $ExePath = Join-Path $RepoRoot "target\release\codexplus.exe"
-}
-if (-not $ReadmePath) {
-    $ReadmePath = Join-Path $RepoRoot "README.md"
-}
-if (-not $OutputDir) {
-    $OutputDir = Join-Path $RepoRoot "target\release"
+function Get-Sha256 {
+    param([string]$Path)
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
-Require-File -Path $ExePath -Label "Release executable"
-Require-File -Path $ReadmePath -Label "README.md"
+function Invoke-CargoBuild {
+    param([string]$RepoRoot)
 
-$versionTag = $Version.Trim()
-if ($versionTag.StartsWith("v")) {
-    $versionTag = $versionTag.Substring(1)
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        throw "cargo is required to build the release executable."
+    }
+
+    $buildLog = Join-Path $env:TEMP "codexplus-release-build.log"
+    if (Test-Path -LiteralPath $buildLog) { Remove-Item -LiteralPath $buildLog -Force }
+    Write-Host "Running cargo build --release --locked. Log: $buildLog"
+
+    $previousEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $proc = Start-Process -FilePath $cargo.Source `
+            -ArgumentList @("build", "--release", "--locked") `
+            -WorkingDirectory $RepoRoot `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $buildLog `
+            -Wait
+    } finally {
+        $ErrorActionPreference = $previousEAP
+    }
+
+    $exitCode = $proc.ExitCode
+    if ($null -eq $exitCode) {
+        $exitCode = -1
+    }
+
+    if ($exitCode -ne 0) {
+        Write-Host "cargo build --release --locked failed with exit code $exitCode."
+        Write-Host "Last 200 log lines:"
+        if (Test-Path -LiteralPath $buildLog) {
+            Get-Content -LiteralPath $buildLog -Tail 200
+        }
+        throw "cargo build --release --locked exited with code $exitCode"
+    }
 }
-if ($versionTag -notmatch '^[0-9]+(\.[0-9]+){0,2}([\-+][0-9A-Za-z.\-]+)?$') {
-    throw "Version '$Version' is not a valid release identifier (e.g. v0.2.0)."
+
+# ----------------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------------
+
+if (-not $SkipBuild) {
+    Invoke-CargoBuild -RepoRoot $RepoRoot
 }
 
-$folderName = "codexplus-v$versionTag-windows-x64"
-$stagingDir = Join-Path $OutputDir $folderName
-$zipPath = Join-Path $OutputDir "$folderName.zip"
+Require-File -Path $SourceExe -Label "Release executable"
 
-if (Test-Path -LiteralPath $stagingDir) {
-    Remove-Item -LiteralPath $stagingDir -Recurse -Force
+if (Test-Path -LiteralPath $ReleaseDir) {
+    Remove-Item -LiteralPath $ReleaseDir -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
+Copy-Item -LiteralPath $SourceExe -Destination $ReleaseExe -Force
 
-Copy-Item -LiteralPath $ExePath -Destination (Join-Path $stagingDir "codexplus.exe") -Force
-Copy-Item -LiteralPath $ReadmePath -Destination (Join-Path $stagingDir "README.md") -Force
+Require-File -Path $ReleaseExe -Label "Published executable"
 
-if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-}
-
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory(
-    $stagingDir,
-    $zipPath,
-    [System.IO.Compression.CompressionLevel]::Optimal,
-    $false
-)
-
-$exeSize = (Get-Item -LiteralPath (Join-Path $stagingDir "codexplus.exe")).Length
-$zipSize = (Get-Item -LiteralPath $zipPath).Length
+$size = (Get-Item -LiteralPath $ReleaseExe).Length
+$hash = Get-Sha256 -Path $ReleaseExe
 
 Write-Host ""
-Write-Host "Release artifacts ready:"
-Write-Host "  Folder : $stagingDir"
-Write-Host "  Zip    : $zipPath"
-Write-Host "  EXE    : $exeSize bytes"
-Write-Host "  ZIP    : $zipSize bytes"
-Write-Host ""
-Write-Host "Contents:"
-Get-ChildItem -LiteralPath $stagingDir |
-    Sort-Object Name |
-    Select-Object Name, Length |
-    Format-Table -AutoSize
+Write-Host "Release executable ready:"
+Write-Host "  Path  : $ReleaseExe"
+Write-Host "  Size  : $size bytes"
+Write-Host "  SHA256: $hash"
