@@ -9,6 +9,8 @@ pub mod render;
 #[cfg(windows)]
 pub mod review_automation;
 #[cfg(windows)]
+pub mod review_automation_ipc;
+#[cfg(windows)]
 pub mod review_button;
 pub mod settings;
 pub mod target_window;

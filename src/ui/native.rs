@@ -22,7 +22,7 @@ use super::app_state::{AppState, RefreshDisposition};
 use super::overlay::OverlayHandle;
 use super::poll::{self, PollOutcome, PollSender};
 use super::prompt_menu;
-use super::review_automation::ReviewAutomation;
+use super::review_automation_ipc::RemoteReviewAutomation as ReviewAutomation;
 use super::review_button::{
     ActionButtonHandle, QuickAction, WM_APP_PLAN_CLICKED, WM_APP_PROMPT_CLICKED,
     WM_APP_REVIEW_CLICKED,
@@ -150,8 +150,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 pub fn overlay_extended_styles_bits() -> u32 {
     // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT.
-    // Deliberately omit WS_EX_TOPMOST: the overlay belongs to the Codex window
-    // and must not float above unrelated foreground applications.
+    // Deliberately omit WS_EX_TOPMOST: the overlay is shown only while Codex is
+    // foreground and must not float above unrelated applications.
     0x00000080 | 0x08000000 | 0x00080000 | 0x00000020
 }
 
@@ -323,7 +323,7 @@ impl AppRuntime {
     }
 
     fn sync_action_buttons(&mut self, target: Option<HWND>, target_is_foreground: bool) {
-        let _ = self.review_automation.advance();
+        self.review_automation.tick(target, target_is_foreground);
         let Some(target) = target else {
             self.prompt_button.hide();
             self.plan_button.hide();
@@ -336,7 +336,7 @@ impl AppRuntime {
             self.review_button.hide();
             return;
         }
-        let Some(buttons) = self.review_automation.inspect_buttons(target) else {
+        let Some(buttons) = self.review_automation.button_state() else {
             self.prompt_button.hide();
             self.plan_button.hide();
             self.review_button.hide();

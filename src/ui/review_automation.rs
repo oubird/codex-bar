@@ -8,23 +8,23 @@
 
 use std::time::{Duration, Instant};
 
+use super::native;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern,
-    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
-    UIA_EditControlTypeId, UIA_NamePropertyId, UIA_ValuePatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
+    IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId,
+    UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_NamePropertyId, UIA_TextPatternId,
+    UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
-
-use super::native;
 
 const RENDER_HOST_CLASS: &str = "Chrome_RenderWidgetHostHWND";
 const COMPOSER_CLASS_PREFIX: &str = "ProseMirror";
@@ -38,7 +38,7 @@ const MODEL_CONTROL_RESERVED_WIDTH: i32 = 32;
 
 const PERMISSION_NAMES: &[&str] = &["更改权限", "Change permissions"];
 const STOP_NAMES: &[&str] = &["停止", "Stop"];
-const UNCOMMITTED_REVIEW_NAMES: &[&str] = &["审查未提交的更改", "Review uncommitted changes"];
+const EMPTY_COMPOSER_PLACEHOLDERS: &[&str] = &["随心输入", "Ask anything"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionButtonState {
@@ -91,26 +91,28 @@ impl ReviewAutomation {
 
     pub fn inspect_buttons(&self, target: HWND) -> Option<ActionButtonState> {
         let automation = self.automation.as_ref()?;
-        let root = render_root(automation, target)?;
-        let composer = find_composer(automation, &root)?;
-        let composer_rect = unsafe { composer.CurrentBoundingRectangle().ok()? };
-        let permission = find_named_element(automation, &root, PERMISSION_NAMES)?;
-        let permission_rect = unsafe { permission.CurrentBoundingRectangle().ok()? };
-        let row_top = permission_rect.top;
-        let row_bottom = permission_rect.bottom;
-        let model_rect = find_model_selector(automation, &root, composer_rect, permission_rect)?;
-        let (prompt_rect, plan_rect, review_rect) =
-            action_button_rects(model_rect.left, row_top, row_bottom, composer_rect.left)?;
-
-        let enabled = composer_is_empty(&composer)
-            && find_named_element(automation, &root, STOP_NAMES).is_none();
-
-        Some(ActionButtonState {
-            prompt_rect,
-            plan_rect,
-            review_rect,
-            enabled,
-        })
+        for (composer, composer_rect) in composer_candidates_near_bottom(automation, target) {
+            let Some((permission_rect, model_rect)) =
+                find_action_row(automation, &composer, composer_rect)
+            else {
+                continue;
+            };
+            let Some((prompt_rect, plan_rect, review_rect)) = action_button_rects(
+                model_rect.left,
+                permission_rect.top,
+                permission_rect.bottom,
+                composer_rect.left,
+            ) else {
+                continue;
+            };
+            return Some(ActionButtonState {
+                prompt_rect,
+                plan_rect,
+                review_rect,
+                enabled: composer_is_empty(&composer),
+            });
+        }
+        None
     }
 
     /// Submit `/review` only when the composer is empty and Codex is idle.
@@ -160,12 +162,11 @@ impl ReviewAutomation {
         target: HWND,
     ) -> Option<(IUIAutomationElement, IUIAutomationValuePattern)> {
         let automation = self.automation.as_ref()?;
-        let root = render_root(automation, target)?;
-        let composer = find_composer(automation, &root)?;
+        let composer = find_composer_near_bottom(automation, target)?;
         if !composer_is_empty(&composer) {
             return None;
         }
-        if find_named_element(automation, &root, STOP_NAMES).is_some() {
+        if named_element_in_ancestors(automation, &composer, STOP_NAMES) {
             return None;
         }
 
@@ -220,14 +221,11 @@ impl ReviewAutomation {
             self.pending = None;
             return false;
         };
-        let Some(root) = render_root(automation, pending.target) else {
-            return true;
-        };
         match pending.stage {
             PendingStage::SubmitCommand => {
                 let submitted = native::root_owner(native::foreground_window())
                     == native::root_owner(pending.target)
-                    && find_composer(automation, &root).is_some()
+                    && find_composer_near_bottom(automation, pending.target).is_some()
                     && send_enter_key();
                 if submitted {
                     if pending.select_target {
@@ -242,11 +240,8 @@ impl ReviewAutomation {
                 }
             }
             PendingStage::SelectTarget => {
-                let menu_ready =
-                    named_action_near_composer_exists(automation, &root, UNCOMMITTED_REVIEW_NAMES);
-                if menu_ready
-                    && native::root_owner(native::foreground_window())
-                        == native::root_owner(pending.target)
+                if native::root_owner(native::foreground_window())
+                    == native::root_owner(pending.target)
                     && send_enter_key()
                 {
                     self.pending = None;
@@ -302,6 +297,95 @@ fn action_button_rects(
     ))
 }
 
+fn find_composer_near_bottom(
+    automation: &IUIAutomation,
+    target: HWND,
+) -> Option<IUIAutomationElement> {
+    composer_candidates_near_bottom(automation, target)
+        .into_iter()
+        .next()
+        .map(|(element, _)| element)
+}
+
+fn composer_candidates_near_bottom(
+    automation: &IUIAutomation,
+    target: HWND,
+) -> Vec<(IUIAutomationElement, RECT)> {
+    let mut candidates: Vec<(IUIAutomationElement, RECT, bool)> = Vec::new();
+    let Some(root) = render_root(automation, target) else {
+        return Vec::new();
+    };
+    let Some(window_rect) = native::window_rect(target) else {
+        return Vec::new();
+    };
+    let control_type = VARIANT::from(UIA_EditControlTypeId.0);
+    let Ok(condition) =
+        (unsafe { automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &control_type) })
+    else {
+        return Vec::new();
+    };
+    let Ok(elements) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
+        return Vec::new();
+    };
+    let Ok(count) = (unsafe { elements.Length() }) else {
+        return Vec::new();
+    };
+    for index in 0..count {
+        let Ok(element) = (unsafe { elements.GetElement(index) }) else {
+            continue;
+        };
+        let class_name = unsafe { element.CurrentClassName().ok() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        if !is_composer_class(&class_name) {
+            continue;
+        }
+        let visible = unsafe { element.CurrentIsOffscreen() }.is_ok_and(|value| !value.as_bool());
+        let enabled = unsafe { element.CurrentIsEnabled() }.is_ok_and(|value| value.as_bool());
+        if !visible || !enabled {
+            continue;
+        }
+        let Ok(rect) = (unsafe { element.CurrentBoundingRectangle() }) else {
+            continue;
+        };
+        if !plausible_composer_rect(window_rect, rect) {
+            continue;
+        }
+        let focused =
+            unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(|value| value.as_bool());
+        candidates.push((element, rect, focused));
+    }
+    candidates.sort_by(
+        |(_, left_rect, left_focused), (_, right_rect, right_focused)| {
+            right_focused
+                .cmp(left_focused)
+                .then_with(|| right_rect.bottom.cmp(&left_rect.bottom))
+                .then_with(|| {
+                    (right_rect.right - right_rect.left).cmp(&(left_rect.right - left_rect.left))
+                })
+        },
+    );
+    candidates
+        .into_iter()
+        .map(|(element, rect, _)| (element, rect))
+        .collect()
+}
+
+fn is_composer_class(class_name: &str) -> bool {
+    class_name
+        .split_ascii_whitespace()
+        .any(|class| class == COMPOSER_CLASS_PREFIX)
+}
+
+fn plausible_composer_rect(window: RECT, candidate: RECT) -> bool {
+    candidate.right - candidate.left >= 300
+        && candidate.bottom > candidate.top
+        && candidate.bottom >= window.bottom - 360
+        && candidate.bottom <= window.bottom + 20
+        && candidate.left >= window.left
+        && candidate.right <= window.right
+}
+
 fn render_root(automation: &IUIAutomation, target: HWND) -> Option<IUIAutomationElement> {
     let class = native::wide_str(RENDER_HOST_CLASS);
     let renderer = unsafe {
@@ -311,39 +395,98 @@ fn render_root(automation: &IUIAutomation, target: HWND) -> Option<IUIAutomation
             windows::core::PCWSTR(class.as_ptr()),
             None,
         )
-        .ok()?
+        .unwrap_or(target)
     };
     unsafe { automation.ElementFromHandle(renderer).ok() }
 }
 
-fn find_composer(
+fn find_action_row(
+    automation: &IUIAutomation,
+    composer: &IUIAutomationElement,
+    composer_rect: RECT,
+) -> Option<(RECT, RECT)> {
+    let walker = unsafe { automation.RawViewWalker().ok()? };
+    let mut scope = composer.clone();
+    for _ in 0..12 {
+        for permission_rect in
+            find_named_element_rects(automation, &scope, PERMISSION_NAMES, composer_rect)
+        {
+            if let Some(model_rect) =
+                find_model_selector(automation, &scope, composer_rect, permission_rect)
+            {
+                return Some((permission_rect, model_rect));
+            }
+        }
+        scope = unsafe { walker.GetParentElement(&scope).ok()? };
+    }
+    None
+}
+
+fn find_named_element_rects(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
-) -> Option<IUIAutomationElement> {
-    let control_type = VARIANT::from(UIA_EditControlTypeId.0);
-    let condition = unsafe {
-        automation
-            .CreatePropertyCondition(UIA_ControlTypePropertyId, &control_type)
-            .ok()?
-    };
-    let elements = unsafe { root.FindAll(TreeScope_Descendants, &condition).ok()? };
-    let count = unsafe { elements.Length().ok()? };
-    let mut match_found = None;
-    for index in 0..count {
-        let Ok(element) = (unsafe { elements.GetElement(index) }) else {
+    names: &[&str],
+    composer_rect: RECT,
+) -> Vec<RECT> {
+    let mut matches = Vec::new();
+    for name in names {
+        let value = VARIANT::from(*name);
+        let Ok(condition) =
+            (unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &value) })
+        else {
             continue;
         };
-        let class_name = unsafe { element.CurrentClassName().ok() }
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        if class_name.starts_with(COMPOSER_CLASS_PREFIX) {
-            if match_found.is_some() {
-                return None;
+        let Ok(elements) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
+            continue;
+        };
+        let Ok(count) = (unsafe { elements.Length() }) else {
+            continue;
+        };
+        for index in 0..count {
+            let Ok(element) = (unsafe { elements.GetElement(index) }) else {
+                continue;
+            };
+            let visible =
+                unsafe { element.CurrentIsOffscreen() }.is_ok_and(|value| !value.as_bool());
+            let Ok(rect) = (unsafe { element.CurrentBoundingRectangle() }) else {
+                continue;
+            };
+            let belongs_to_composer = visible
+                && rect.right > rect.left
+                && rect.bottom > rect.top
+                && rect.left >= composer_rect.left
+                && rect.right <= composer_rect.right
+                && rect.top >= composer_rect.top
+                && rect.bottom <= composer_rect.bottom + 160;
+            if belongs_to_composer {
+                matches.push(rect);
             }
-            match_found = Some(element);
         }
     }
-    match_found
+    matches.sort_by_key(|rect| (rect.top, rect.left));
+    matches.reverse();
+    matches
+}
+
+fn named_element_in_ancestors(
+    automation: &IUIAutomation,
+    composer: &IUIAutomationElement,
+    names: &[&str],
+) -> bool {
+    let Ok(walker) = (unsafe { automation.RawViewWalker() }) else {
+        return true;
+    };
+    let mut scope = composer.clone();
+    for _ in 0..12 {
+        if find_named_element(automation, &scope, names).is_some() {
+            return true;
+        }
+        let Ok(parent) = (unsafe { walker.GetParentElement(&scope) }) else {
+            break;
+        };
+        scope = parent;
+    }
+    false
 }
 
 fn find_named_element(
@@ -388,8 +531,10 @@ fn find_model_selector(
         let Ok(rect) = (unsafe { element.CurrentBoundingRectangle() }) else {
             continue;
         };
+        let visible = unsafe { element.CurrentIsOffscreen() }.is_ok_and(|value| !value.as_bool());
         let shares_row = rect.bottom > row_rect.top && rect.top < row_rect.bottom;
-        let plausible_model_picker = shares_row
+        let plausible_model_picker = visible
+            && shares_row
             && rect.left >= composer_center
             && rect.right <= composer_rect.right
             && rect.right - rect.left >= 48;
@@ -400,50 +545,16 @@ fn find_model_selector(
     best
 }
 
-fn named_action_near_composer_exists(
-    automation: &IUIAutomation,
-    root: &IUIAutomationElement,
-    names: &[&str],
-) -> bool {
-    let Some(composer) = find_composer(automation, root) else {
-        return false;
-    };
-    let Ok(composer_rect) = (unsafe { composer.CurrentBoundingRectangle() }) else {
-        return false;
-    };
-    for name in names {
-        let value = VARIANT::from(*name);
-        let Ok(condition) =
-            (unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &value) })
-        else {
-            continue;
-        };
-        let Ok(elements) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
-            continue;
-        };
-        let Ok(count) = (unsafe { elements.Length() }) else {
-            continue;
-        };
-        for index in 0..count {
-            let Ok(element) = (unsafe { elements.GetElement(index) }) else {
-                continue;
-            };
-            let Ok(rect) = (unsafe { element.CurrentBoundingRectangle() }) else {
-                continue;
-            };
-            let near_composer = rect.bottom <= composer_rect.top
-                && rect.bottom >= composer_rect.top - 500
-                && rect.right > composer_rect.left
-                && rect.left < composer_rect.right;
-            if near_composer {
-                return true;
+fn composer_is_empty(composer: &IUIAutomationElement) -> bool {
+    if let Ok(pattern) =
+        unsafe { composer.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+    {
+        if let Ok(range) = unsafe { pattern.DocumentRange() } {
+            if let Ok(text) = unsafe { range.GetText(-1) } {
+                return text_represents_empty_composer(&text.to_string());
             }
         }
     }
-    false
-}
-
-fn composer_is_empty(composer: &IUIAutomationElement) -> bool {
     let Ok(pattern) =
         (unsafe { composer.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) })
     else {
@@ -458,14 +569,16 @@ fn composer_is_empty(composer: &IUIAutomationElement) -> bool {
     value_represents_empty_composer(&value, &name)
 }
 
+fn text_represents_empty_composer(text: &str) -> bool {
+    let text = text.trim();
+    text.is_empty() || EMPTY_COMPOSER_PLACEHOLDERS.contains(&text)
+}
+
 fn rollback_synthetic_command(automation: Option<&IUIAutomation>, target: HWND, command: &str) {
     let Some(automation) = automation else {
         return;
     };
-    let Some(root) = render_root(automation, target) else {
-        return;
-    };
-    let Some(composer) = find_composer(automation, &root) else {
+    let Some(composer) = find_composer_near_bottom(automation, target) else {
         return;
     };
     let Ok(pattern) =
@@ -556,6 +669,20 @@ mod tests {
     fn user_draft_is_never_considered_empty() {
         assert!(!value_represents_empty_composer("保留我的草稿", "随心输入"));
         assert!(!value_represents_empty_composer("/review", "随心输入"));
+    }
+
+    #[test]
+    fn text_pattern_placeholder_is_empty_but_user_text_is_not() {
+        assert!(text_represents_empty_composer("\n随心输入"));
+        assert!(text_represents_empty_composer("Ask anything"));
+        assert!(!text_represents_empty_composer("保留我的草稿"));
+    }
+
+    #[test]
+    fn composer_class_accepts_dynamic_focus_marker() {
+        assert!(is_composer_class("ProseMirror"));
+        assert!(is_composer_class("ProseMirror ProseMirror-focused"));
+        assert!(!is_composer_class("NotProseMirror"));
     }
 
     #[test]

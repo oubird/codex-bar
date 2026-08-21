@@ -5,6 +5,13 @@ use std::process::ExitCode;
 
 #[cfg(windows)]
 fn main() -> ExitCode {
+    let mut args = env::args();
+    let _ = args.next();
+    if args.next().as_deref() == Some("--uia-helper") {
+        let parent_pid = args.next().and_then(|value| value.parse().ok());
+        let code = codexplus::ui::review_automation_ipc::run_helper(parent_pid);
+        return ExitCode::from(code as u8);
+    }
     if env::args().any(|arg| arg == "--diagnose") {
         let code = codexplus::diagnose::run();
         return ExitCode::from(code as u8);

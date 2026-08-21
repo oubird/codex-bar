@@ -14,9 +14,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
     GetWindowRect, RegisterClassExW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    GWLP_HWNDPARENT, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SW_HIDE, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use super::native;
@@ -30,7 +30,6 @@ const REVIEW_BUTTON_CLASS: &str = "CodexPlusReviewButton";
 
 struct ReviewButtonData {
     host: HWND,
-    owner: HWND,
     enabled: bool,
     hovered: bool,
     language: Language,
@@ -62,7 +61,6 @@ impl ActionButtonHandle {
             let _ = RegisterClassExW(&window_class);
             let data = Box::new(ReviewButtonData {
                 host,
-                owner: HWND::default(),
                 enabled: false,
                 hovered: false,
                 language: Language::SimplifiedChinese,
@@ -91,15 +89,11 @@ impl ActionButtonHandle {
         }
     }
 
-    pub fn sync(&self, target: HWND, rect: RECT, enabled: bool, language: Language) {
+    pub fn sync(&self, _target: HWND, rect: RECT, enabled: bool, language: Language) {
         unsafe {
             let Some(data) = data_for(self.hwnd) else {
                 return;
             };
-            if data.owner != target {
-                let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, target.0 as isize);
-                data.owner = target;
-            }
             if data.enabled != enabled || data.language != language {
                 data.enabled = enabled;
                 data.language = language;
@@ -110,12 +104,25 @@ impl ActionButtonHandle {
             }
             let _ = SetWindowPos(
                 self.hwnd,
-                HWND_TOP,
+                HWND_TOPMOST,
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
                 rect.bottom - rect.top,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            // A normal no-activate popup cannot reliably rise above another
+            // process's active window. Pulse through the topmost band and
+            // immediately demote it: the button stays above Codex, while IME
+            // candidate windows and other real topmost UI remain above it.
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
             );
         }
     }

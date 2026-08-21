@@ -19,9 +19,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, GetWindowRect,
     RegisterClassExW, SetWindowLongPtrW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_HREDRAW,
-    CS_VREDRAW, GWLP_HWNDPARENT, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, ULW_ALPHA, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
-    WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    CS_VREDRAW, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+    ULW_ALPHA, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE,
+    WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use super::native;
@@ -88,7 +88,6 @@ fn build_premultiplied_pixels(coverages: &[u8], rgb: (u8, u8, u8)) -> Vec<u8> {
 struct OverlayData {
     state: ViewState,
     visible: bool,
-    owner: HWND,
     display: DisplayOptions,
 }
 
@@ -113,7 +112,6 @@ impl OverlayHandle {
             let data = Box::new(OverlayData {
                 state: ViewState::Loading { cached: None },
                 visible: false,
-                owner: HWND::default(),
                 display: DisplayOptions::default(),
             });
             let data_ptr = Box::into_raw(data);
@@ -162,7 +160,7 @@ impl OverlayHandle {
             self.hide();
             return;
         };
-        if !enabled || !is_target_displayable(target) {
+        if !enabled || !target_is_foreground || !is_target_displayable(target) {
             self.hide();
             return;
         }
@@ -173,10 +171,6 @@ impl OverlayHandle {
             if !data.state.is_displayable() {
                 self.hide();
                 return;
-            }
-            if data.owner != target {
-                let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, target.0 as isize);
-                data.owner = target;
             }
         }
         let Some(rect) = target_overlay_rect(target) else {
@@ -190,23 +184,14 @@ impl OverlayHandle {
                 return;
             }
 
-            let insert_after = if target_is_foreground {
-                HWND_TOP
-            } else {
-                HWND::default()
-            };
-            let mut flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
-            if !target_is_foreground {
-                flags |= SWP_NOZORDER;
-            }
             let _ = SetWindowPos(
                 self.hwnd,
-                insert_after,
+                HWND_TOP,
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
                 rect.bottom - rect.top,
-                flags,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
             if let Some(data) = data_for(self.hwnd) {
                 data.visible = true;
