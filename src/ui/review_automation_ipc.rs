@@ -25,7 +25,8 @@ use super::review_automation::{ActionButtonState, ReviewAutomation as LocalAutom
 // above that baseline while still terminating a genuinely stuck provider
 // quickly enough that it cannot create a persistent cross-process hang.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(1_500);
-const NORMAL_PROBE_INTERVAL: Duration = Duration::from_secs(1);
+const NORMAL_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_CACHED_UNAVAILABLE_SCANS: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -275,6 +276,7 @@ pub struct RemoteReviewAutomation {
     buttons: Option<ActionButtonState>,
     next_probe_at: Instant,
     consecutive_timeouts: u32,
+    consecutive_unavailable_scans: u32,
 }
 
 impl RemoteReviewAutomation {
@@ -291,6 +293,7 @@ impl RemoteReviewAutomation {
             buttons: None,
             next_probe_at: Instant::now(),
             consecutive_timeouts: 0,
+            consecutive_unavailable_scans: 0,
         }
     }
 
@@ -301,6 +304,7 @@ impl RemoteReviewAutomation {
         if target_value != self.current_target {
             self.current_target = target_value;
             self.buttons = None;
+            self.consecutive_unavailable_scans = 0;
             self.next_probe_at = Instant::now();
         }
         self.drain_replies();
@@ -401,6 +405,7 @@ impl RemoteReviewAutomation {
             self.buttons = None;
             self.action_active = false;
             self.queued_action = None;
+            self.consecutive_unavailable_scans = 0;
             if reply.timed_out {
                 self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
                 self.next_probe_at = Instant::now() + recovery_delay(self.consecutive_timeouts);
@@ -417,12 +422,20 @@ impl RemoteReviewAutomation {
                 }
                 if response.status == HelperStatus::Ok {
                     self.buttons = response.buttons.map(Into::into);
-                } else if let Some(buttons) = self.buttons.as_mut() {
-                    // Chromium may briefly omit accessibility descendants
-                    // while React commits a new tree. Keep the last known
-                    // geometry so the controls do not flicker, but make them
-                    // non-interactive until a complete scan succeeds again.
-                    buttons.enabled = false;
+                    self.consecutive_unavailable_scans = 0;
+                } else {
+                    self.consecutive_unavailable_scans =
+                        self.consecutive_unavailable_scans.saturating_add(1);
+                    if self.consecutive_unavailable_scans <= MAX_CACHED_UNAVAILABLE_SCANS {
+                        if let Some(buttons) = self.buttons.as_mut() {
+                            // Allow one transient React accessibility-tree
+                            // commit without moving the controls. They remain
+                            // visible but cannot be clicked until confirmed.
+                            buttons.enabled = false;
+                        }
+                    } else {
+                        self.buttons = None;
+                    }
                 }
                 self.consecutive_timeouts = 0;
                 self.next_probe_at = Instant::now() + NORMAL_PROBE_INTERVAL;
@@ -434,6 +447,7 @@ impl RemoteReviewAutomation {
                     self.action_active = false;
                 }
                 self.buttons = None;
+                self.consecutive_unavailable_scans = 0;
                 if !self.action_active {
                     self.next_probe_at = Instant::now() + NORMAL_PROBE_INTERVAL;
                 }
@@ -454,6 +468,7 @@ impl RemoteReviewAutomation {
         } else {
             self.buttons = None;
             self.action_active = false;
+            self.consecutive_unavailable_scans = 0;
             self.next_probe_at = Instant::now() + Duration::from_secs(10);
         }
     }
@@ -606,6 +621,7 @@ mod tests {
                 buttons: None,
                 next_probe_at: Instant::now(),
                 consecutive_timeouts: 0,
+                consecutive_unavailable_scans: 0,
             },
             command_receiver,
             reply_sender,
@@ -622,6 +638,11 @@ mod tests {
         assert_eq!(recovery_delay(2), Duration::from_secs(5));
         assert_eq!(recovery_delay(3), Duration::from_secs(10));
         assert_eq!(recovery_delay(100), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn normal_scans_run_twice_per_second() {
+        assert_eq!(NORMAL_PROBE_INTERVAL, Duration::from_millis(500));
     }
 
     #[test]
@@ -736,6 +757,41 @@ mod tests {
         let buttons = remote.button_state().unwrap();
         assert_eq!(buttons.prompt_rect.left, 10);
         assert!(!buttons.enabled);
+        assert_eq!(remote.consecutive_unavailable_scans, 1);
+    }
+
+    #[test]
+    fn repeated_unavailable_scans_hide_cached_geometry() {
+        let (mut remote, commands, replies) = test_remote();
+        remote.current_target = Some(123);
+        remote.buttons = Some(ActionButtonState {
+            prompt_rect: RECT::default(),
+            plan_rect: RECT::default(),
+            review_rect: RECT::default(),
+            enabled: true,
+        });
+
+        for id in 1..=2 {
+            remote.next_probe_at = Instant::now();
+            remote.tick(Some(test_hwnd(123)), true);
+            let _ = commands.try_recv().unwrap();
+            replies
+                .send(BrokerReply {
+                    id,
+                    response: Some(HelperResponse {
+                        id,
+                        status: HelperStatus::Unavailable,
+                        pending: false,
+                        buttons: None,
+                    }),
+                    timed_out: false,
+                })
+                .unwrap();
+            remote.tick(Some(test_hwnd(123)), true);
+        }
+
+        assert!(remote.button_state().is_none());
+        assert_eq!(remote.consecutive_unavailable_scans, 2);
     }
 
     #[test]
