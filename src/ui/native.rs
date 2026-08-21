@@ -21,6 +21,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::app_state::{AppState, RefreshDisposition};
 use super::overlay::OverlayHandle;
 use super::poll::{self, PollOutcome, PollSender};
+use super::review_automation::ReviewAutomation;
+use super::review_button::{
+    ActionButtonHandle, QuickAction, WM_APP_PLAN_CLICKED, WM_APP_REVIEW_CLICKED,
+};
 use super::settings::{self as settings_window, WM_APP_SETTINGS_CHANGED};
 use super::target_window;
 use super::tray::{
@@ -215,6 +219,9 @@ pub fn enumerate_top_level() -> Vec<HWND> {
 struct AppRuntime {
     state: AppState,
     overlay: OverlayHandle,
+    plan_button: ActionButtonHandle,
+    review_button: ActionButtonHandle,
+    review_automation: ReviewAutomation,
     tray: TrayIcon,
     poll_sender: PollSender,
     poll_receiver: Receiver<PollOutcome>,
@@ -228,12 +235,18 @@ impl AppRuntime {
         let initial_display = DisplayOptions::from(&settings);
         let state = AppState::new(settings, cached);
         let overlay = OverlayHandle::create()?;
+        let plan_button = ActionButtonHandle::create(hwnd, QuickAction::Plan)?;
+        let review_button = ActionButtonHandle::create(hwnd, QuickAction::Review)?;
+        let review_automation = ReviewAutomation::new();
         let mut tray = TrayIcon::new(hwnd);
         tray.add_or_update(&state.state, initial_display);
         let (poll_sender, poll_receiver) = poll::start();
         let mut runtime = Self {
             state,
             overlay,
+            plan_button,
+            review_button,
+            review_automation,
             tray,
             poll_sender,
             poll_receiver,
@@ -299,8 +312,73 @@ impl AppRuntime {
             self.state.settings.overlay_enabled,
             target_is_foreground,
         );
+        self.sync_action_buttons(target, target_is_foreground);
         self.tray
             .add_or_update(&self.state.state, self.display_options());
+    }
+
+    fn sync_action_buttons(&mut self, target: Option<HWND>, target_is_foreground: bool) {
+        let _ = self.review_automation.advance();
+        let Some(target) = target else {
+            self.plan_button.hide();
+            self.review_button.hide();
+            return;
+        };
+        if !target_is_foreground || self.review_automation.is_pending() {
+            self.plan_button.hide();
+            self.review_button.hide();
+            return;
+        }
+        let Some(buttons) = self.review_automation.inspect_buttons(target) else {
+            self.plan_button.hide();
+            self.review_button.hide();
+            return;
+        };
+        self.plan_button.sync(
+            target,
+            buttons.plan_rect,
+            buttons.enabled,
+            self.state.settings.language,
+        );
+        self.review_button.sync(
+            target,
+            buttons.review_rect,
+            buttons.enabled,
+            self.state.settings.language,
+        );
+    }
+
+    fn start_plan(&mut self) {
+        let Some(target) = self
+            .last_target
+            .as_ref()
+            .map(|identity| HWND(identity.hwnd as *mut _))
+        else {
+            return;
+        };
+        if root_owner(foreground_window()) != root_owner(target) {
+            return;
+        }
+        if self.review_automation.begin_plan(target) {
+            self.plan_button.hide();
+            self.review_button.hide();
+        }
+    }
+
+    fn start_uncommitted_review(&mut self) {
+        let Some(target) = self
+            .last_target
+            .as_ref()
+            .map(|identity| HWND(identity.hwnd as *mut _))
+        else {
+            return;
+        };
+        if root_owner(foreground_window()) != root_owner(target) {
+            return;
+        }
+        if self.review_automation.begin_uncommitted_review(target) {
+            self.review_button.hide();
+        }
     }
 
     fn display_options(&self) -> DisplayOptions {
@@ -319,6 +397,8 @@ impl AppRuntime {
 
     fn shutdown(&mut self) {
         self.tray.remove();
+        self.plan_button.destroy();
+        self.review_button.destroy();
         self.overlay.destroy();
     }
 }
@@ -413,6 +493,18 @@ unsafe extern "system" fn host_proc(
                     .set_state(runtime.state.state.clone(), display);
                 runtime.sync_overlay();
                 runtime.request_refresh();
+            }
+            LRESULT(0)
+        }
+        WM_APP_REVIEW_CLICKED => {
+            if let Some(runtime) = runtime_for(hwnd) {
+                runtime.start_uncommitted_review();
+            }
+            LRESULT(0)
+        }
+        WM_APP_PLAN_CLICKED => {
+            if let Some(runtime) = runtime_for(hwnd) {
+                runtime.start_plan();
             }
             LRESULT(0)
         }
