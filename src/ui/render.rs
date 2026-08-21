@@ -15,7 +15,7 @@ use crate::model::ViewState;
 pub const OVERLAY_LOGICAL_WIDTH: i32 = 400;
 pub const OVERLAY_LOGICAL_HEIGHT: i32 = 30;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedRow {
     pub text: String,
     pub tone: Tone,

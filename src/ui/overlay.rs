@@ -19,13 +19,13 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, GetWindowRect,
     RegisterClassExW, SetWindowLongPtrW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_HREDRAW,
-    CS_VREDRAW, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    ULW_ALPHA, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    CS_VREDRAW, GWLP_HWNDPARENT, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SW_HIDE, ULW_ALPHA, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use super::native;
-use super::render::{build_text, Tone, OVERLAY_LOGICAL_HEIGHT, OVERLAY_LOGICAL_WIDTH};
+use super::render::{build_text, RenderedRow, Tone, OVERLAY_LOGICAL_HEIGHT, OVERLAY_LOGICAL_WIDTH};
 use crate::formatting::{format_tray_tooltip, DisplayOptions};
 use crate::model::{UsageSnapshot, ViewState};
 
@@ -89,6 +89,23 @@ struct OverlayData {
     state: ViewState,
     visible: bool,
     display: DisplayOptions,
+    last_render: Option<RenderSignature>,
+    owner: HWND,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderSignature {
+    rect: (i32, i32, i32, i32),
+    row: RenderedRow,
+}
+
+impl RenderSignature {
+    fn new(rect: RECT, row: RenderedRow) -> Self {
+        Self {
+            rect: (rect.left, rect.top, rect.right, rect.bottom),
+            row,
+        }
+    }
 }
 
 pub struct OverlayHandle {
@@ -113,6 +130,8 @@ impl OverlayHandle {
                 state: ViewState::Loading { cached: None },
                 visible: false,
                 display: DisplayOptions::default(),
+                last_render: None,
+                owner: HWND::default(),
             });
             let data_ptr = Box::into_raw(data);
             let hwnd = CreateWindowExW(
@@ -179,21 +198,39 @@ impl OverlayHandle {
         };
 
         unsafe {
-            if render_transparent_text(self.hwnd, rect).is_err() {
+            let Some(data) = data_for(self.hwnd) else {
+                return;
+            };
+            let now = UsageSnapshot::now();
+            let shift = native::local_shift_seconds(now);
+            let row = build_text(&data.state, now, data.display, shift);
+            let signature = RenderSignature::new(rect, row.clone());
+            let needs_render = data.last_render.as_ref() != Some(&signature);
+            let was_visible = data.visible;
+            let owner_changed = data.owner != target;
+
+            if owner_changed {
+                let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, target.0 as isize);
+                data.owner = target;
+            }
+
+            if needs_render && render_transparent_text(self.hwnd, rect, &row).is_err() {
                 self.hide();
                 return;
             }
-
-            let _ = SetWindowPos(
-                self.hwnd,
-                HWND_TOP,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+            if needs_render || !was_visible || owner_changed {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
             if let Some(data) = data_for(self.hwnd) {
+                data.last_render = Some(signature);
                 data.visible = true;
             }
         }
@@ -201,8 +238,10 @@ impl OverlayHandle {
 
     pub fn hide(&self) {
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
             if let Some(data) = data_for(self.hwnd) {
+                if data.visible {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                }
                 data.visible = false;
             }
         }
@@ -262,18 +301,16 @@ unsafe extern "system" fn overlay_proc(
     }
 }
 
-unsafe fn render_transparent_text(hwnd: HWND, destination: RECT) -> Result<(), ()> {
+unsafe fn render_transparent_text(
+    hwnd: HWND,
+    destination: RECT,
+    row: &RenderedRow,
+) -> Result<(), ()> {
     let width = destination.right - destination.left;
     let height = destination.bottom - destination.top;
     if width <= 0 || height <= 0 {
         return Err(());
     }
-    let Some(data) = data_for(hwnd) else {
-        return Err(());
-    };
-    let now = UsageSnapshot::now();
-    let shift = native::local_shift_seconds(now);
-    let row = build_text(&data.state, now, data.display, shift);
     let tone_rgb = tone_text_rgb(row.tone);
 
     let scale = TEXT_RENDER_SCALE;
@@ -519,6 +556,53 @@ mod tests {
         assert_eq!(tone_text_rgb(Tone::Ok), (82, 88, 96));
         assert_ne!(tone_text_rgb(Tone::Warn), tone_text_rgb(Tone::Critical));
         assert_ne!(tone_text_rgb(Tone::Ok), tone_text_rgb(Tone::Stale));
+    }
+
+    #[test]
+    fn render_signature_changes_only_for_visual_differences() {
+        let rect = RECT {
+            left: 10,
+            top: 20,
+            right: 410,
+            bottom: 50,
+        };
+        let base = RenderSignature::new(
+            rect,
+            RenderedRow {
+                text: "周限额 83%".to_string(),
+                tone: Tone::Warn,
+            },
+        );
+        assert_eq!(
+            base,
+            RenderSignature::new(
+                rect,
+                RenderedRow {
+                    text: "周限额 83%".to_string(),
+                    tone: Tone::Warn,
+                },
+            )
+        );
+        assert_ne!(
+            base,
+            RenderSignature::new(
+                RECT { left: 11, ..rect },
+                RenderedRow {
+                    text: "周限额 83%".to_string(),
+                    tone: Tone::Warn,
+                },
+            )
+        );
+        assert_ne!(
+            base,
+            RenderSignature::new(
+                rect,
+                RenderedRow {
+                    text: "周限额 82%".to_string(),
+                    tone: Tone::Warn,
+                },
+            )
+        );
     }
 
     fn build_block(value: u8, width: usize, height: usize) -> Vec<u8> {
