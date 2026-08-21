@@ -13,17 +13,19 @@ use windows::Win32::System::Time::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, GWLP_USERDATA, HICON, IDI_APPLICATION, MSG, SW_HIDE,
-    WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSEXW,
+    GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, GWLP_USERDATA, HICON, IDI_APPLICATION, MSG,
+    SW_HIDE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSEXW,
 };
 
 use super::app_state::{AppState, RefreshDisposition};
 use super::overlay::OverlayHandle;
 use super::poll::{self, PollOutcome, PollSender};
+use super::prompt_menu;
 use super::review_automation::ReviewAutomation;
 use super::review_button::{
-    ActionButtonHandle, QuickAction, WM_APP_PLAN_CLICKED, WM_APP_REVIEW_CLICKED,
+    ActionButtonHandle, QuickAction, WM_APP_PLAN_CLICKED, WM_APP_PROMPT_CLICKED,
+    WM_APP_REVIEW_CLICKED,
 };
 use super::settings::{self as settings_window, WM_APP_SETTINGS_CHANGED};
 use super::target_window;
@@ -219,6 +221,7 @@ pub fn enumerate_top_level() -> Vec<HWND> {
 struct AppRuntime {
     state: AppState,
     overlay: OverlayHandle,
+    prompt_button: ActionButtonHandle,
     plan_button: ActionButtonHandle,
     review_button: ActionButtonHandle,
     review_automation: ReviewAutomation,
@@ -235,6 +238,7 @@ impl AppRuntime {
         let initial_display = DisplayOptions::from(&settings);
         let state = AppState::new(settings, cached);
         let overlay = OverlayHandle::create()?;
+        let prompt_button = ActionButtonHandle::create(hwnd, QuickAction::Prompt)?;
         let plan_button = ActionButtonHandle::create(hwnd, QuickAction::Plan)?;
         let review_button = ActionButtonHandle::create(hwnd, QuickAction::Review)?;
         let review_automation = ReviewAutomation::new();
@@ -244,6 +248,7 @@ impl AppRuntime {
         let mut runtime = Self {
             state,
             overlay,
+            prompt_button,
             plan_button,
             review_button,
             review_automation,
@@ -320,20 +325,29 @@ impl AppRuntime {
     fn sync_action_buttons(&mut self, target: Option<HWND>, target_is_foreground: bool) {
         let _ = self.review_automation.advance();
         let Some(target) = target else {
+            self.prompt_button.hide();
             self.plan_button.hide();
             self.review_button.hide();
             return;
         };
         if !target_is_foreground || self.review_automation.is_pending() {
+            self.prompt_button.hide();
             self.plan_button.hide();
             self.review_button.hide();
             return;
         }
         let Some(buttons) = self.review_automation.inspect_buttons(target) else {
+            self.prompt_button.hide();
             self.plan_button.hide();
             self.review_button.hide();
             return;
         };
+        self.prompt_button.sync(
+            target,
+            buttons.prompt_rect,
+            buttons.enabled && !self.state.settings.quick_prompts.is_empty(),
+            self.state.settings.language,
+        );
         self.plan_button.sync(
             target,
             buttons.plan_rect,
@@ -348,6 +362,43 @@ impl AppRuntime {
         );
     }
 
+    fn start_prompt_menu(&mut self) {
+        let Some(target) = self
+            .last_target
+            .as_ref()
+            .map(|identity| HWND(identity.hwnd as *mut _))
+        else {
+            return;
+        };
+        if root_owner(foreground_window()) != root_owner(target)
+            || self.state.settings.quick_prompts.is_empty()
+        {
+            return;
+        }
+        let Some(anchor) = self.prompt_button.screen_rect() else {
+            return;
+        };
+        let prompts = self.state.settings.quick_prompts.clone();
+        let Some(selected) =
+            prompt_menu::select_prompt(self.prompt_button.hwnd(), anchor, &prompts)
+        else {
+            return;
+        };
+        let Some(prompt) = prompts.get(selected) else {
+            return;
+        };
+        let _ = unsafe { SetForegroundWindow(target) };
+        if self.review_automation.begin_prompt(target, prompt) {
+            self.hide_action_buttons();
+        }
+    }
+
+    fn hide_action_buttons(&self) {
+        self.prompt_button.hide();
+        self.plan_button.hide();
+        self.review_button.hide();
+    }
+
     fn start_plan(&mut self) {
         let Some(target) = self
             .last_target
@@ -360,8 +411,7 @@ impl AppRuntime {
             return;
         }
         if self.review_automation.begin_plan(target) {
-            self.plan_button.hide();
-            self.review_button.hide();
+            self.hide_action_buttons();
         }
     }
 
@@ -377,7 +427,7 @@ impl AppRuntime {
             return;
         }
         if self.review_automation.begin_uncommitted_review(target) {
-            self.review_button.hide();
+            self.hide_action_buttons();
         }
     }
 
@@ -397,6 +447,7 @@ impl AppRuntime {
 
     fn shutdown(&mut self) {
         self.tray.remove();
+        self.prompt_button.destroy();
         self.plan_button.destroy();
         self.review_button.destroy();
         self.overlay.destroy();
@@ -505,6 +556,12 @@ unsafe extern "system" fn host_proc(
         WM_APP_PLAN_CLICKED => {
             if let Some(runtime) = runtime_for(hwnd) {
                 runtime.start_plan();
+            }
+            LRESULT(0)
+        }
+        WM_APP_PROMPT_CLICKED => {
+            if let Some(runtime) = runtime_for(hwnd) {
+                runtime.start_prompt_menu();
             }
             LRESULT(0)
         }

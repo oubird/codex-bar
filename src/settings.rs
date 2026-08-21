@@ -54,6 +54,15 @@ pub enum Language {
     English,
 }
 
+pub const MAX_QUICK_PROMPTS: usize = 20;
+pub const MAX_QUICK_PROMPT_CHARS: usize = 2_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickPromptError {
+    TooMany,
+    TooLong,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default = "default_schema_version")]
@@ -80,6 +89,10 @@ pub struct Settings {
     pub reset_time_display: ResetTimeDisplay,
     #[serde(default)]
     pub language: Language,
+    /// User-authored high-frequency prompts. These are ordinary local UI
+    /// settings and are never included in logs or diagnostics.
+    #[serde(default)]
+    pub quick_prompts: Vec<String>,
 }
 
 const SCHEMA_VERSION: u32 = 2;
@@ -116,6 +129,7 @@ impl Default for Settings {
             usage_display: UsageDisplay::default(),
             reset_time_display: ResetTimeDisplay::default(),
             language: Language::default(),
+            quick_prompts: Vec::new(),
         }
     }
 }
@@ -132,6 +146,7 @@ pub struct SettingsPatch {
     pub usage_display: Option<UsageDisplay>,
     pub reset_time_display: Option<ResetTimeDisplay>,
     pub language: Option<Language>,
+    pub quick_prompts: Option<Vec<String>>,
 }
 
 impl SettingsPatch {
@@ -164,6 +179,9 @@ impl SettingsPatch {
         }
         if let Some(value) = self.language {
             settings.language = value;
+        }
+        if let Some(value) = self.quick_prompts {
+            settings.quick_prompts = normalize_quick_prompts(value);
         }
         settings.custom_proxy_credential_target = None;
         settings.schema_version = SCHEMA_VERSION;
@@ -200,7 +218,37 @@ fn normalize(mut settings: Settings) -> Settings {
         }
     }
     settings.custom_proxy_credential_target = None;
+    settings.quick_prompts = normalize_quick_prompts(settings.quick_prompts);
     settings
+}
+
+pub fn parse_quick_prompts(value: &str) -> Result<Vec<String>, QuickPromptError> {
+    let prompts = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if prompts.len() > MAX_QUICK_PROMPTS {
+        return Err(QuickPromptError::TooMany);
+    }
+    if prompts
+        .iter()
+        .any(|prompt| prompt.chars().count() > MAX_QUICK_PROMPT_CHARS)
+    {
+        return Err(QuickPromptError::TooLong);
+    }
+    Ok(prompts.into_iter().map(str::to_owned).collect())
+}
+
+fn normalize_quick_prompts(prompts: Vec<String>) -> Vec<String> {
+    prompts
+        .into_iter()
+        .map(|prompt| prompt.trim().to_owned())
+        .filter(|prompt| !prompt.is_empty())
+        .filter(|prompt| !prompt.contains(['\r', '\n']))
+        .filter(|prompt| prompt.chars().count() <= MAX_QUICK_PROMPT_CHARS)
+        .take(MAX_QUICK_PROMPTS)
+        .collect()
 }
 
 pub fn save(settings: &Settings) -> io::Result<()> {
@@ -240,6 +288,7 @@ mod tests {
         assert_eq!(settings.usage_display, UsageDisplay::Remaining);
         assert_eq!(settings.reset_time_display, ResetTimeDisplay::Countdown);
         assert_eq!(settings.language, Language::SimplifiedChinese);
+        assert!(settings.quick_prompts.is_empty());
     }
 
     #[test]
@@ -264,6 +313,31 @@ mod tests {
         }
         .apply_to(&mut settings);
         assert_eq!(settings.language, Language::English);
+    }
+
+    #[test]
+    fn quick_prompts_parse_one_non_empty_instruction_per_line() {
+        assert_eq!(
+            parse_quick_prompts("  审查当前改动  \r\n\r\n给出实施计划\n").unwrap(),
+            vec!["审查当前改动", "给出实施计划"]
+        );
+    }
+
+    #[test]
+    fn quick_prompts_enforce_count_and_length_limits() {
+        let too_many = (0..=MAX_QUICK_PROMPTS)
+            .map(|index| format!("指令{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            parse_quick_prompts(&too_many),
+            Err(QuickPromptError::TooMany)
+        );
+        let too_long = "好".repeat(MAX_QUICK_PROMPT_CHARS + 1);
+        assert_eq!(
+            parse_quick_prompts(&too_long),
+            Err(QuickPromptError::TooLong)
+        );
     }
 
     #[test]
@@ -423,6 +497,7 @@ mod tests {
             usage_display: UsageDisplay::Used,
             reset_time_display: ResetTimeDisplay::Absolute,
             language: Language::English,
+            quick_prompts: vec!["should be reset".to_owned()],
         });
         assert!(settings.overlay_enabled);
         assert_eq!(settings.proxy_mode, ProxyMode::Environment);

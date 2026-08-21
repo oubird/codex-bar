@@ -3,6 +3,8 @@
 pub mod app_state;
 pub mod native;
 pub mod poll;
+#[cfg(windows)]
+pub mod prompt_menu;
 pub mod render;
 #[cfg(windows)]
 pub mod review_automation;

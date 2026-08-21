@@ -13,9 +13,9 @@ use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
-    RegisterClassExW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWLP_HWNDPARENT,
-    GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    GetWindowRect, RegisterClassExW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    GWLP_HWNDPARENT, GWLP_USERDATA, HWND_TOP, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    SW_HIDE, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
@@ -24,6 +24,7 @@ use crate::settings::Language;
 
 pub const WM_APP_REVIEW_CLICKED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 12;
 pub const WM_APP_PLAN_CLICKED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 13;
+pub const WM_APP_PROMPT_CLICKED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 14;
 
 const REVIEW_BUTTON_CLASS: &str = "CodexPlusReviewButton";
 
@@ -38,6 +39,7 @@ struct ReviewButtonData {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum QuickAction {
+    Prompt,
     Plan,
     Review,
 }
@@ -132,6 +134,17 @@ impl ActionButtonHandle {
             let _ = DestroyWindow(self.hwnd);
         }
     }
+
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
+    pub fn screen_rect(&self) -> Option<RECT> {
+        unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(self.hwnd, &mut rect).ok().map(|_| rect)
+        }
+    }
 }
 
 unsafe fn data_for(hwnd: HWND) -> Option<&'static mut ReviewButtonData> {
@@ -185,6 +198,7 @@ unsafe extern "system" fn button_proc(
             if let Some(data) = data_for(hwnd) {
                 if data.enabled {
                     let message = match data.action {
+                        QuickAction::Prompt => WM_APP_PROMPT_CLICKED,
                         QuickAction::Plan => WM_APP_PLAN_CLICKED,
                         QuickAction::Review => WM_APP_REVIEW_CLICKED,
                     };
@@ -236,6 +250,7 @@ unsafe fn paint_button(hwnd: HWND) {
     let background_brush = CreateSolidBrush(background);
     let _ = FillRect(dc, &rect, background_brush);
     match data.action {
+        QuickAction::Prompt => draw_prompt_icon(dc, rect, icon),
         QuickAction::Plan => draw_plan_icon(dc, rect, icon),
         QuickAction::Review => draw_review_icon(dc, rect, icon),
     }
@@ -245,11 +260,32 @@ unsafe fn paint_button(hwnd: HWND) {
 
 fn accessible_title(action: QuickAction, language: Language) -> &'static str {
     match (action, language) {
+        (QuickAction::Prompt, Language::SimplifiedChinese) => "快捷指令",
+        (QuickAction::Prompt, Language::English) => "Quick prompts",
         (QuickAction::Plan, Language::SimplifiedChinese) => "制定计划",
         (QuickAction::Plan, Language::English) => "Create plan",
         (QuickAction::Review, Language::SimplifiedChinese) => "审查未提交的更改",
         (QuickAction::Review, Language::English) => "Review uncommitted changes",
     }
+}
+
+unsafe fn draw_prompt_icon(dc: windows::Win32::Graphics::Gdi::HDC, rect: RECT, color: COLORREF) {
+    let center_x = (rect.left + rect.right) / 2;
+    let center_y = (rect.top + rect.bottom) / 2;
+    let pen = CreatePen(PS_SOLID, 1, color);
+    let previous_pen = SelectObject(dc, pen);
+    let previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+
+    // Command-prompt chevron plus cursor, drawn without a font dependency.
+    let _ = MoveToEx(dc, center_x - 7, center_y - 5, None);
+    let _ = LineTo(dc, center_x - 2, center_y);
+    let _ = LineTo(dc, center_x - 7, center_y + 5);
+    let _ = MoveToEx(dc, center_x, center_y + 5, None);
+    let _ = LineTo(dc, center_x + 7, center_y + 5);
+
+    let _ = SelectObject(dc, previous_brush);
+    let _ = SelectObject(dc, previous_pen);
+    let _ = DeleteObject(pen);
 }
 
 unsafe fn draw_plan_icon(dc: windows::Win32::Graphics::Gdi::HDC, rect: RECT, color: COLORREF) {

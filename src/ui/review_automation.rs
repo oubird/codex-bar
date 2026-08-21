@@ -42,6 +42,7 @@ const UNCOMMITTED_REVIEW_NAMES: &[&str] = &["审查未提交的更改", "Review 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionButtonState {
+    pub prompt_rect: RECT,
     pub plan_rect: RECT,
     pub review_rect: RECT,
     pub enabled: bool,
@@ -51,7 +52,7 @@ struct PendingReview {
     target: HWND,
     expires_at: Instant,
     next_action_at: Instant,
-    command: &'static str,
+    command: String,
     select_target: bool,
     stage: PendingStage,
 }
@@ -98,13 +99,14 @@ impl ReviewAutomation {
         let row_top = permission_rect.top;
         let row_bottom = permission_rect.bottom;
         let model_rect = find_model_selector(automation, &root, composer_rect, permission_rect)?;
-        let (plan_rect, review_rect) =
+        let (prompt_rect, plan_rect, review_rect) =
             action_button_rects(model_rect.left, row_top, row_bottom, composer_rect.left)?;
 
         let enabled = composer_is_empty(&composer)
             && find_named_element(automation, &root, STOP_NAMES).is_none();
 
         Some(ActionButtonState {
+            prompt_rect,
             plan_rect,
             review_rect,
             enabled,
@@ -121,50 +123,77 @@ impl ReviewAutomation {
         self.begin_command(target, PLAN_COMMAND, false)
     }
 
-    fn begin_command(&mut self, target: HWND, command: &'static str, select_target: bool) -> bool {
-        let Some(automation) = self.automation.as_ref() else {
-            return false;
-        };
-        let Some(root) = render_root(automation, target) else {
-            return false;
-        };
-        let Some(composer) = find_composer(automation, &root) else {
-            return false;
-        };
-        if !composer_is_empty(&composer) {
+    /// Insert an ordinary user-authored prompt without activating slash-command
+    /// semantics, then submit it with a real Enter key.
+    pub fn begin_prompt(&mut self, target: HWND, prompt: &str) -> bool {
+        let prompt = prompt.trim();
+        if prompt.is_empty() || prompt.contains(['\r', '\n']) {
             return false;
         }
-        if find_named_element(automation, &root, STOP_NAMES).is_some() {
+        let Some((composer, value_pattern)) = self.action_composer(target) else {
             return false;
+        };
+        if unsafe { value_pattern.SetValue(&BSTR::from(prompt)) }.is_err()
+            || unsafe { composer.SetFocus() }.is_err()
+        {
+            return false;
+        }
+        self.set_pending(target, prompt, false);
+        true
+    }
+
+    fn begin_command(&mut self, target: HWND, command: &str, select_target: bool) -> bool {
+        let Some((composer, _value_pattern)) = self.action_composer(target) else {
+            return false;
+        };
+        // ProseMirror must receive real keyboard events so Codex can recognize
+        // the slash command and switch modes instead of sending literal text.
+        if unsafe { composer.SetFocus() }.is_err() || !send_unicode_text(command) {
+            return false;
+        }
+        self.set_pending(target, command, select_target);
+        true
+    }
+
+    fn action_composer(
+        &self,
+        target: HWND,
+    ) -> Option<(IUIAutomationElement, IUIAutomationValuePattern)> {
+        let automation = self.automation.as_ref()?;
+        let root = render_root(automation, target)?;
+        let composer = find_composer(automation, &root)?;
+        if !composer_is_empty(&composer) {
+            return None;
+        }
+        if find_named_element(automation, &root, STOP_NAMES).is_some() {
+            return None;
         }
 
         let Ok(value_pattern) = (unsafe {
             composer.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
         }) else {
-            return false;
+            return None;
         };
         if unsafe {
             value_pattern
                 .CurrentIsReadOnly()
                 .map_or(true, |value| value.as_bool())
         } {
-            return false;
+            return None;
         }
-        // ProseMirror must receive real keyboard events so Codex can recognize
-        // the slash command and switch modes instead of sending literal text.
-        if unsafe { composer.SetFocus() }.is_err() || !send_unicode_text(command) {
-            return false;
-        }
+        Some((composer, value_pattern))
+    }
+
+    fn set_pending(&mut self, target: HWND, command: &str, select_target: bool) {
         let now = Instant::now();
         self.pending = Some(PendingReview {
             target,
             expires_at: now + REVIEW_TARGET_TIMEOUT,
             next_action_at: now + COMMAND_SETTLE_DELAY,
-            command,
+            command: command.to_owned(),
             select_target,
             stage: PendingStage::SubmitCommand,
         });
-        true
     }
 
     /// Continue the keyboard-driven slash-command flow.
@@ -178,7 +207,7 @@ impl ReviewAutomation {
                 rollback_synthetic_command(
                     self.automation.as_ref(),
                     pending.target,
-                    pending.command,
+                    &pending.command,
                 );
             }
             self.pending = None;
@@ -238,7 +267,7 @@ fn action_button_rects(
     row_top: i32,
     row_bottom: i32,
     composer_left: i32,
-) -> Option<(RECT, RECT)> {
+) -> Option<(RECT, RECT, RECT)> {
     if row_bottom <= row_top {
         return None;
     }
@@ -246,10 +275,18 @@ fn action_button_rects(
     let review_left = review_right - REVIEW_BUTTON_WIDTH;
     let plan_right = review_left - REVIEW_BUTTON_GAP;
     let plan_left = plan_right - REVIEW_BUTTON_WIDTH;
-    if plan_left < composer_left + REVIEW_BUTTON_GAP {
+    let prompt_right = plan_left - REVIEW_BUTTON_GAP;
+    let prompt_left = prompt_right - REVIEW_BUTTON_WIDTH;
+    if prompt_left < composer_left + REVIEW_BUTTON_GAP {
         return None;
     }
     Some((
+        RECT {
+            left: prompt_left,
+            top: row_top,
+            right: prompt_right,
+            bottom: row_bottom,
+        },
         RECT {
             left: plan_left,
             top: row_top,
@@ -524,6 +561,12 @@ mod tests {
     #[test]
     fn button_state_remains_plain_data() {
         let state = ActionButtonState {
+            prompt_rect: RECT {
+                left: -26,
+                top: 20,
+                right: 2,
+                bottom: 48,
+            },
             plan_rect: RECT {
                 left: 10,
                 top: 20,
@@ -552,11 +595,12 @@ mod tests {
 
     #[test]
     fn buttons_are_anchored_immediately_left_of_model_picker() {
-        let (plan, review) = action_button_rects(600, 20, 48, 10).unwrap();
+        let (prompt, plan, review) = action_button_rects(600, 20, 48, 10).unwrap();
         assert_eq!(review.right, 600 - MODEL_CONTROL_RESERVED_WIDTH);
         assert_eq!(review.right - review.left, REVIEW_BUTTON_WIDTH);
         assert_eq!(plan.right - plan.left, REVIEW_BUTTON_WIDTH);
         assert_eq!(review.left - plan.right, REVIEW_BUTTON_GAP);
+        assert_eq!(plan.left - prompt.right, REVIEW_BUTTON_GAP);
     }
 
     #[test]

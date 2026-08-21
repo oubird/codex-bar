@@ -19,14 +19,15 @@ use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetWindowLongPtrW,
-    GetWindowTextW, IsDialogMessageW, IsWindow, PostMessageW, RegisterClassExW, SendMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, BM_GETCHECK, BM_SETCHECK,
-    BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT,
-    DM_SETDEFID, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_STYLE, HMENU, MSG, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_DISABLED,
-    WS_EX_CLIENTEDGE, WS_GROUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, IsWindow, PostMessageW,
+    RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON,
+    BS_PUSHBUTTON, CW_USEDEFAULT, DM_SETDEFID, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
+    ES_WANTRETURN, GWLP_USERDATA, GWL_STYLE, HMENU, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_NCCREATE,
+    WM_PAINT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_DISABLED, WS_EX_CLIENTEDGE,
+    WS_GROUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use crate::localization::texts;
@@ -43,6 +44,8 @@ const ID_PAGE_SUBTITLE: usize = 11;
 const ID_DISPLAY_TITLE: usize = 12;
 const ID_PROXY_TITLE: usize = 13;
 const ID_PROXY_HELP: usize = 14;
+const ID_QUICK_PROMPTS_TITLE: usize = 15;
+const ID_QUICK_PROMPTS_HELP: usize = 16;
 const ID_OVERLAY: usize = 101;
 const ID_INTERVAL_LABEL: usize = 102;
 const ID_INTERVAL: usize = 103;
@@ -60,9 +63,10 @@ const ID_PROXY_DIRECT: usize = 202;
 const ID_PROXY_CUSTOM: usize = 203;
 const ID_PROXY_ADDRESS_LABEL: usize = 204;
 const ID_PROXY_ADDRESS: usize = 205;
+const ID_QUICK_PROMPTS: usize = 301;
 
 const CLIENT_WIDTH: i32 = 560;
-const CLIENT_HEIGHT: i32 = 742;
+const CLIENT_HEIGHT: i32 = 850;
 
 // Colors are stored in 0x00BBGGRR layout (Win32 COLORREF).
 const COLOR_WINDOW_BG: u32 = 0x00F4F5F7;
@@ -104,6 +108,7 @@ impl LogicalRect {
 #[derive(Clone, Copy, Debug)]
 struct SettingsLayout {
     display_card: LogicalRect,
+    quick_prompts_card: LogicalRect,
     proxy_card: LogicalRect,
     save_button: LogicalRect,
     cancel_button: LogicalRect,
@@ -113,9 +118,10 @@ impl SettingsLayout {
     const fn new() -> Self {
         Self {
             display_card: LogicalRect::new(20, 88, 520, 304),
-            proxy_card: LogicalRect::new(20, 408, 520, 244),
-            cancel_button: LogicalRect::new(350, 682, 88, 36),
-            save_button: LogicalRect::new(448, 682, 92, 36),
+            quick_prompts_card: LogicalRect::new(20, 408, 520, 144),
+            proxy_card: LogicalRect::new(20, 568, 520, 208),
+            cancel_button: LogicalRect::new(350, 798, 88, 36),
+            save_button: LogicalRect::new(448, 798, 92, 36),
         }
     }
 }
@@ -417,7 +423,10 @@ unsafe fn paint_static(hwnd: HWND, hdc: HDC, control: HWND) -> LRESULT {
     };
     let id = GetDlgCtrlID(control);
     let page_text = matches!(id as usize, ID_PAGE_TITLE | ID_PAGE_SUBTITLE);
-    let secondary = matches!(id as usize, ID_PAGE_SUBTITLE | ID_PROXY_HELP);
+    let secondary = matches!(
+        id as usize,
+        ID_PAGE_SUBTITLE | ID_PROXY_HELP | ID_QUICK_PROMPTS_HELP
+    );
     let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(
         hdc,
@@ -448,6 +457,7 @@ unsafe fn paint_chrome(hwnd: HWND) {
 
     let layout = SettingsLayout::new();
     draw_card(hdc, data, scaled_rect(layout.display_card, data.dpi));
+    draw_card(hdc, data, scaled_rect(layout.quick_prompts_card, data.dpi));
     draw_card(hdc, data, scaled_rect(layout.proxy_card, data.dpi));
     let _ = EndPaint(hwnd, &paint);
 }
@@ -532,6 +542,10 @@ unsafe fn build_controls(hwnd: HWND) {
         WS_TABSTOP.0,
     );
 
+    label(hwnd, ID_QUICK_PROMPTS_TITLE, ui.quick_prompts_card_title);
+    label(hwnd, ID_QUICK_PROMPTS_HELP, ui.quick_prompts_help);
+    multiline_edit(hwnd, ID_QUICK_PROMPTS);
+
     label(hwnd, ID_PROXY_TITLE, ui.proxy_card_title);
     button(
         hwnd,
@@ -603,6 +617,12 @@ unsafe fn build_controls(hwnd: HWND) {
         ID_LANGUAGE_ENGLISH,
         language_id == ID_LANGUAGE_ENGLISH,
     );
+    if !current.quick_prompts.is_empty() {
+        set_text(
+            child(hwnd, ID_QUICK_PROMPTS),
+            &current.quick_prompts.join("\r\n"),
+        );
+    }
 
     match current.proxy_mode {
         ProxyMode::Environment => check(hwnd, ID_PROXY_ENV, true),
@@ -707,36 +727,55 @@ unsafe fn layout_controls(hwnd: HWND) {
 
     place(
         hwnd,
-        ID_PROXY_TITLE,
+        ID_QUICK_PROMPTS_TITLE,
         LogicalRect::new(40, 424, 480, 22),
         dpi,
     );
-    place(hwnd, ID_PROXY_ENV, LogicalRect::new(40, 456, 480, 24), dpi);
+    place(
+        hwnd,
+        ID_QUICK_PROMPTS_HELP,
+        LogicalRect::new(40, 450, 480, 20),
+        dpi,
+    );
+    place(
+        hwnd,
+        ID_QUICK_PROMPTS,
+        LogicalRect::new(40, 476, 480, 60),
+        dpi,
+    );
+
+    place(
+        hwnd,
+        ID_PROXY_TITLE,
+        LogicalRect::new(40, 584, 480, 22),
+        dpi,
+    );
+    place(hwnd, ID_PROXY_ENV, LogicalRect::new(40, 612, 480, 24), dpi);
     place(
         hwnd,
         ID_PROXY_DIRECT,
-        LogicalRect::new(40, 488, 480, 24),
+        LogicalRect::new(40, 640, 480, 24),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_CUSTOM,
-        LogicalRect::new(40, 520, 480, 24),
+        LogicalRect::new(40, 668, 480, 24),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_ADDRESS_LABEL,
-        LogicalRect::new(40, 561, 480, 20),
+        LogicalRect::new(40, 700, 480, 20),
         dpi,
     );
     place(
         hwnd,
         ID_PROXY_ADDRESS,
-        LogicalRect::new(40, 586, 480, 32),
+        LogicalRect::new(40, 722, 480, 30),
         dpi,
     );
-    place(hwnd, ID_PROXY_HELP, LogicalRect::new(40, 624, 480, 18), dpi);
+    place(hwnd, ID_PROXY_HELP, LogicalRect::new(40, 754, 480, 18), dpi);
 
     place(hwnd, ID_CANCEL, layout.cancel_button, dpi);
     place(hwnd, ID_SAVE, layout.save_button, dpi);
@@ -758,7 +797,12 @@ unsafe fn apply_fonts(hwnd: HWND) {
     let Some(data) = get_data(hwnd) else {
         return;
     };
-    for id in [ID_PAGE_TITLE, ID_DISPLAY_TITLE, ID_PROXY_TITLE] {
+    for id in [
+        ID_PAGE_TITLE,
+        ID_DISPLAY_TITLE,
+        ID_QUICK_PROMPTS_TITLE,
+        ID_PROXY_TITLE,
+    ] {
         set_font(child(hwnd, id), data.font_bold);
     }
     for id in [
@@ -775,6 +819,8 @@ unsafe fn apply_fonts(hwnd: HWND) {
         ID_LANGUAGE_LABEL,
         ID_LANGUAGE_ZH_CN,
         ID_LANGUAGE_ENGLISH,
+        ID_QUICK_PROMPTS_HELP,
+        ID_QUICK_PROMPTS,
         ID_PROXY_ENV,
         ID_PROXY_DIRECT,
         ID_PROXY_CUSTOM,
@@ -799,6 +845,7 @@ unsafe fn apply_themes(hwnd: HWND) {
         ID_RESET_ABSOLUTE,
         ID_LANGUAGE_ZH_CN,
         ID_LANGUAGE_ENGLISH,
+        ID_QUICK_PROMPTS,
         ID_PROXY_ENV,
         ID_PROXY_DIRECT,
         ID_PROXY_CUSTOM,
@@ -834,6 +881,13 @@ unsafe fn save(hwnd: HWND) {
         Language::SimplifiedChinese
     };
     let mut settings_value = settings::load();
+    let quick_prompts = match settings::parse_quick_prompts(&text(hwnd, ID_QUICK_PROMPTS)) {
+        Ok(prompts) => prompts,
+        Err(_) => {
+            show_invalid_quick_prompts_message(hwnd);
+            return;
+        }
+    };
     let address = text(hwnd, ID_PROXY_ADDRESS);
     let trimmed_address = address.trim().to_string();
     if mode == ProxyMode::Custom {
@@ -855,6 +909,7 @@ unsafe fn save(hwnd: HWND) {
         usage_display: Some(usage_display),
         reset_time_display: Some(reset_time_display),
         language: Some(language),
+        quick_prompts: Some(quick_prompts),
     }
     .apply_to(&mut settings_value);
     if settings::save(&settings_value).is_err() {
@@ -886,6 +941,20 @@ unsafe fn show_invalid_proxy_message(hwnd: HWND) {
         .unwrap_or_else(|| texts(Language::SimplifiedChinese).settings);
     let message = wide(ui.invalid_proxy_message);
     let title = wide(ui.invalid_proxy_title);
+    let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+        hwnd,
+        PCWSTR(message.as_ptr()),
+        PCWSTR(title.as_ptr()),
+        Default::default(),
+    );
+}
+
+unsafe fn show_invalid_quick_prompts_message(hwnd: HWND) {
+    let ui = get_data(hwnd)
+        .map(|data| texts(data.language).settings)
+        .unwrap_or_else(|| texts(Language::SimplifiedChinese).settings);
+    let message = wide(ui.quick_prompts_invalid);
+    let title = wide(ui.title);
     let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
         hwnd,
         PCWSTR(message.as_ptr()),
@@ -959,6 +1028,31 @@ unsafe fn edit(hwnd: HWND, id: usize, digits: bool) {
     );
 }
 
+unsafe fn multiline_edit(hwnd: HWND, id: usize) {
+    let class = wide("EDIT");
+    let style = WS_CHILD.0
+        | WS_VISIBLE.0
+        | WS_TABSTOP.0
+        | WS_VSCROLL.0
+        | ES_MULTILINE as u32
+        | ES_AUTOVSCROLL as u32
+        | ES_WANTRETURN as u32;
+    let _ = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        PCWSTR(class.as_ptr()),
+        PCWSTR::null(),
+        WINDOW_STYLE(style),
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        HMENU(id as *mut _),
+        HINSTANCE::default(),
+        None,
+    );
+}
+
 unsafe fn set_font(hwnd: HWND, font: HFONT) {
     let _ = SendMessageW(
         hwnd,
@@ -991,8 +1085,10 @@ unsafe fn checked(hwnd: HWND, id: usize) -> bool {
 }
 
 unsafe fn text(hwnd: HWND, id: usize) -> String {
-    let mut buf = [0u16; 1024];
-    let len = GetWindowTextW(child(hwnd, id), &mut buf);
+    let control = child(hwnd, id);
+    let length = GetWindowTextLengthW(control).max(0) as usize;
+    let mut buf = vec![0u16; length.saturating_add(1)];
+    let len = GetWindowTextW(control, &mut buf);
     String::from_utf16_lossy(&buf[..len as usize])
 }
 
@@ -1014,6 +1110,7 @@ mod tests {
         let layout = SettingsLayout::new();
         for rect in [
             layout.display_card,
+            layout.quick_prompts_card,
             layout.proxy_card,
             layout.cancel_button,
             layout.save_button,
@@ -1024,16 +1121,18 @@ mod tests {
             assert!(rect.bottom() <= CLIENT_HEIGHT);
         }
         assert!(layout.display_card.bottom() < layout.proxy_card.top);
+        assert!(layout.display_card.bottom() < layout.quick_prompts_card.top);
+        assert!(layout.quick_prompts_card.bottom() < layout.proxy_card.top);
         assert!(layout.proxy_card.bottom() < layout.save_button.top);
     }
 
     #[test]
     fn scaling_preserves_expected_dimensions() {
         for (dpi, expected_width, expected_height) in [
-            (96, 560, 742),
-            (120, 700, 928),
-            (144, 840, 1113),
-            (192, 1120, 1484),
+            (96, 560, 850),
+            (120, 700, 1063),
+            (144, 840, 1275),
+            (192, 1120, 1700),
         ] {
             assert_eq!(scale(CLIENT_WIDTH, dpi), expected_width);
             assert_eq!(scale(CLIENT_HEIGHT, dpi), expected_height);
