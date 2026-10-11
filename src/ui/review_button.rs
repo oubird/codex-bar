@@ -264,8 +264,8 @@ fn accessible_title(action: QuickAction, language: Language) -> &'static str {
         (QuickAction::Prompt, Language::English) => "Quick prompts",
         (QuickAction::Plan, Language::SimplifiedChinese) => "制定计划",
         (QuickAction::Plan, Language::English) => "Create plan",
-        (QuickAction::Review, Language::SimplifiedChinese) => "审查未提交的更改",
-        (QuickAction::Review, Language::English) => "Review uncommitted changes",
+        (QuickAction::Review, Language::SimplifiedChinese) => "审查所有未提交的改动",
+        (QuickAction::Review, Language::English) => "Review all uncommitted changes",
     }
 }
 

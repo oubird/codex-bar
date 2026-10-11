@@ -1,8 +1,7 @@
-//! Safe UI Automation bridge for Codex's built-in uncommitted-changes review.
+//! Safe UI Automation bridge for Codex's composer quick actions.
 //!
 //! The desktop app owns the review command. CodexPlus only locates the active
-//! composer, refuses to overwrite a draft, types `/review`, then follows the
-//! same two Enter-key selections as the native UI.
+//! composer, refuses to overwrite a draft, and submits prompts or `/plan`.
 
 #![cfg(windows)]
 
@@ -28,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
 
 const RENDER_HOST_CLASS: &str = "Chrome_RenderWidgetHostHWND";
 const COMPOSER_CLASS_PREFIX: &str = "ProseMirror";
-const REVIEW_COMMAND: &str = "/review";
+const REVIEW_PROMPT: &str = "审查所有未提交的改动";
 const PLAN_COMMAND: &str = "/plan";
 const REVIEW_TARGET_TIMEOUT: Duration = Duration::from_secs(3);
 const COMMAND_SETTLE_DELAY: Duration = Duration::from_millis(150);
@@ -38,7 +37,12 @@ const MODEL_CONTROL_RESERVED_WIDTH: i32 = 32;
 
 const PERMISSION_NAMES: &[&str] = &["更改权限", "Change permissions"];
 const STOP_NAMES: &[&str] = &["停止", "Stop"];
-const EMPTY_COMPOSER_PLACEHOLDERS: &[&str] = &["随心输入", "Ask anything"];
+const EMPTY_COMPOSER_PLACEHOLDERS: &[&str] = &[
+    "随心输入",
+    "Ask anything",
+    "与 Codex 协作",
+    "Work with Codex",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionButtonState {
@@ -53,14 +57,6 @@ struct PendingReview {
     expires_at: Instant,
     next_action_at: Instant,
     command: String,
-    select_target: bool,
-    stage: PendingStage,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PendingStage {
-    SubmitCommand,
-    SelectTarget,
 }
 
 pub struct ReviewAutomation {
@@ -115,14 +111,14 @@ impl ReviewAutomation {
         None
     }
 
-    /// Submit `/review` only when the composer is empty and Codex is idle.
+    /// Submit the review prompt through the same path as a quick prompt.
     pub fn begin_uncommitted_review(&mut self, target: HWND) -> bool {
-        self.begin_command(target, REVIEW_COMMAND, true)
+        self.begin_prompt(target, REVIEW_PROMPT)
     }
 
     /// Submit `/plan` only when the composer is empty and Codex is idle.
     pub fn begin_plan(&mut self, target: HWND) -> bool {
-        self.begin_command(target, PLAN_COMMAND, false)
+        self.begin_command(target, PLAN_COMMAND)
     }
 
     /// Insert an ordinary user-authored prompt without activating slash-command
@@ -140,11 +136,11 @@ impl ReviewAutomation {
         {
             return false;
         }
-        self.set_pending(target, prompt, false);
+        self.set_pending(target, prompt);
         true
     }
 
-    fn begin_command(&mut self, target: HWND, command: &str, select_target: bool) -> bool {
+    fn begin_command(&mut self, target: HWND, command: &str) -> bool {
         let Some((composer, _value_pattern)) = self.action_composer(target) else {
             return false;
         };
@@ -153,7 +149,7 @@ impl ReviewAutomation {
         if unsafe { composer.SetFocus() }.is_err() || !send_unicode_text(command) {
             return false;
         }
-        self.set_pending(target, command, select_target);
+        self.set_pending(target, command);
         true
     }
 
@@ -185,15 +181,13 @@ impl ReviewAutomation {
         Some((composer, value_pattern))
     }
 
-    fn set_pending(&mut self, target: HWND, command: &str, select_target: bool) {
+    fn set_pending(&mut self, target: HWND, command: &str) {
         let now = Instant::now();
         self.pending = Some(PendingReview {
             target,
             expires_at: now + REVIEW_TARGET_TIMEOUT,
             next_action_at: now + COMMAND_SETTLE_DELAY,
             command: command.to_owned(),
-            select_target,
-            stage: PendingStage::SubmitCommand,
         });
     }
 
@@ -204,13 +198,7 @@ impl ReviewAutomation {
             return false;
         };
         if Instant::now() >= pending.expires_at || !native::is_window_visible(pending.target) {
-            if pending.stage == PendingStage::SubmitCommand {
-                rollback_synthetic_command(
-                    self.automation.as_ref(),
-                    pending.target,
-                    &pending.command,
-                );
-            }
+            rollback_synthetic_command(self.automation.as_ref(), pending.target, &pending.command);
             self.pending = None;
             return false;
         }
@@ -221,33 +209,13 @@ impl ReviewAutomation {
             self.pending = None;
             return false;
         };
-        match pending.stage {
-            PendingStage::SubmitCommand => {
-                let submitted = native::root_owner(native::foreground_window())
-                    == native::root_owner(pending.target)
-                    && find_composer_near_bottom(automation, pending.target).is_some()
-                    && send_enter_key();
-                if submitted {
-                    if pending.select_target {
-                        if let Some(pending) = self.pending.as_mut() {
-                            pending.stage = PendingStage::SelectTarget;
-                            pending.next_action_at = Instant::now() + COMMAND_SETTLE_DELAY;
-                        }
-                    } else {
-                        self.pending = None;
-                        return false;
-                    }
-                }
-            }
-            PendingStage::SelectTarget => {
-                if native::root_owner(native::foreground_window())
-                    == native::root_owner(pending.target)
-                    && send_enter_key()
-                {
-                    self.pending = None;
-                    return false;
-                }
-            }
+        let submitted = native::root_owner(native::foreground_window())
+            == native::root_owner(pending.target)
+            && find_composer_near_bottom(automation, pending.target).is_some()
+            && send_enter_key();
+        if submitted {
+            self.pending = None;
+            return false;
         }
         true
     }
@@ -675,7 +643,11 @@ mod tests {
     fn text_pattern_placeholder_is_empty_but_user_text_is_not() {
         assert!(text_represents_empty_composer("\n随心输入"));
         assert!(text_represents_empty_composer("Ask anything"));
+        assert!(text_represents_empty_composer("\n与 Codex 协作\r\n"));
+        assert!(text_represents_empty_composer("Work with Codex"));
         assert!(!text_represents_empty_composer("保留我的草稿"));
+        assert!(!text_represents_empty_composer(REVIEW_PROMPT));
+        assert!(!text_represents_empty_composer("与 Codex 协作完成审查"));
     }
 
     #[test]
