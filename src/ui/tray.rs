@@ -2,16 +2,18 @@
 
 #![cfg(windows)]
 
+use std::sync::OnceLock;
+
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    NOTIFYICONDATAW, NOTIFY_ICON_MESSAGE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TrackPopupMenu,
-    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, RegisterWindowMessageW,
+    SetForegroundWindow, TrackPopupMenu, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
 use super::native;
@@ -26,6 +28,14 @@ pub const IDM_SETTINGS: usize = 1003;
 pub const IDM_DIAGNOSE: usize = 1004;
 pub const IDM_EXIT: usize = 1005;
 const TRAY_ICON_ID: u32 = 1;
+
+pub fn taskbar_created_message() -> u32 {
+    static MESSAGE: OnceLock<u32> = OnceLock::new();
+    *MESSAGE.get_or_init(|| unsafe {
+        let name = wide("TaskbarCreated");
+        RegisterWindowMessageW(PCWSTR(name.as_ptr()))
+    })
+}
 
 pub struct TrayIcon {
     hwnd: HWND,
@@ -46,11 +56,15 @@ impl TrayIcon {
             let now = UsageSnapshot::now();
             let shift = native::local_shift_seconds(now);
             write_tip(&mut data, &format_tray_tooltip(state, now, display, shift));
-            let operation = if self.added { NIM_MODIFY } else { NIM_ADD };
-            if Shell_NotifyIconW(operation, &data).as_bool() {
-                self.added = true;
-            }
+            self.added = update_registration(self.added, |operation| {
+                Shell_NotifyIconW(operation, &data).as_bool()
+            });
         }
+    }
+
+    pub fn restore(&mut self, state: &ViewState, display: DisplayOptions) {
+        self.added = false;
+        self.add_or_update(state, display);
     }
 
     pub fn remove(&mut self) {
@@ -138,6 +152,17 @@ impl TrayIcon {
     }
 }
 
+fn update_registration(added: bool, mut notify: impl FnMut(NOTIFY_ICON_MESSAGE) -> bool) -> bool {
+    let operations = if added {
+        [NIM_MODIFY, NIM_ADD]
+    } else {
+        // A timer may already have restored the icon before TaskbarCreated
+        // arrives. If adding fails, try updating the existing registration.
+        [NIM_ADD, NIM_MODIFY]
+    };
+    operations.into_iter().any(&mut notify)
+}
+
 unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -161,4 +186,51 @@ fn write_tip(data: &mut NOTIFYICONDATAW, text: &str) {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_icon_is_added_after_modify_fails() {
+        let mut operations = Vec::new();
+        assert!(update_registration(true, |operation| {
+            operations.push(operation);
+            operation == NIM_ADD
+        }));
+        assert_eq!(operations, [NIM_MODIFY, NIM_ADD]);
+    }
+
+    #[test]
+    fn delayed_restart_notification_accepts_existing_icon() {
+        let mut operations = Vec::new();
+        assert!(update_registration(false, |operation| {
+            operations.push(operation);
+            operation == NIM_MODIFY
+        }));
+        assert_eq!(operations, [NIM_ADD, NIM_MODIFY]);
+    }
+
+    #[test]
+    fn unavailable_shell_keeps_registration_retryable() {
+        let added = update_registration(true, |_| false);
+        assert!(!added);
+        let mut operations = Vec::new();
+        assert!(update_registration(added, |operation| {
+            operations.push(operation);
+            true
+        }));
+        assert_eq!(operations, [NIM_ADD]);
+    }
+
+    #[test]
+    fn successful_update_does_not_add_duplicate() {
+        let mut operations = Vec::new();
+        assert!(update_registration(true, |operation| {
+            operations.push(operation);
+            true
+        }));
+        assert_eq!(operations, [NIM_MODIFY]);
+    }
 }

@@ -42,6 +42,7 @@ const EMPTY_COMPOSER_PLACEHOLDERS: &[&str] = &[
     "Ask anything",
     "与 Codex 协作",
     "Work with Codex",
+    "和 Codex 一起工作",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,32 +515,38 @@ fn find_model_selector(
 }
 
 fn composer_is_empty(composer: &IUIAutomationElement) -> bool {
-    if let Ok(pattern) =
-        unsafe { composer.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
-    {
-        if let Ok(range) = unsafe { pattern.DocumentRange() } {
-            if let Ok(text) = unsafe { range.GetText(-1) } {
-                return text_represents_empty_composer(&text.to_string());
-            }
-        }
+    let text = unsafe {
+        composer
+            .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            .and_then(|pattern| pattern.DocumentRange())
+            .and_then(|range| range.GetText(-1))
+            .ok()
     }
-    let Ok(pattern) =
-        (unsafe { composer.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) })
-    else {
-        return false;
-    };
-    let value = unsafe { pattern.CurrentValue().ok() }
-        .map(|value| value.to_string())
-        .unwrap_or_default();
+    .map(|text| text.to_string());
+    let value = unsafe {
+        composer
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .and_then(|pattern| pattern.CurrentValue())
+            .ok()
+    }
+    .map(|value| value.to_string());
     let name = unsafe { composer.CurrentName().ok() }
         .map(|value| value.to_string())
         .unwrap_or_default();
-    value_represents_empty_composer(&value, &name)
+    composer_content_is_empty(text.as_deref(), value.as_deref(), &name)
 }
 
-fn text_represents_empty_composer(text: &str) -> bool {
-    let text = text.trim();
-    text.is_empty() || EMPTY_COMPOSER_PLACEHOLDERS.contains(&text)
+fn composer_content_is_empty(text: Option<&str>, value: Option<&str>, name: &str) -> bool {
+    // Chromium may expose the placeholder as both document text and value.
+    // Its accessible name follows the current translation, so prefer that
+    // metadata over a fixed list. Any conflicting draft blocks the action.
+    if text.is_none() && value.is_none() {
+        return false;
+    }
+    [text, value].into_iter().flatten().all(|content| {
+        value_represents_empty_composer(content, name)
+            || (name.trim().is_empty() && EMPTY_COMPOSER_PLACEHOLDERS.contains(&content.trim()))
+    })
 }
 
 fn rollback_synthetic_command(automation: Option<&IUIAutomation>, target: HWND, command: &str) {
@@ -640,14 +647,60 @@ mod tests {
     }
 
     #[test]
-    fn text_pattern_placeholder_is_empty_but_user_text_is_not() {
-        assert!(text_represents_empty_composer("\n随心输入"));
-        assert!(text_represents_empty_composer("Ask anything"));
-        assert!(text_represents_empty_composer("\n与 Codex 协作\r\n"));
-        assert!(text_represents_empty_composer("Work with Codex"));
-        assert!(!text_represents_empty_composer("保留我的草稿"));
-        assert!(!text_represents_empty_composer(REVIEW_PROMPT));
-        assert!(!text_represents_empty_composer("与 Codex 协作完成审查"));
+    fn placeholder_metadata_handles_current_and_future_translations() {
+        for placeholder in EMPTY_COMPOSER_PLACEHOLDERS
+            .iter()
+            .copied()
+            .chain(["未来版本的输入提示"])
+        {
+            let text = format!("\n{placeholder}\r\n");
+            assert!(composer_content_is_empty(
+                Some(&text),
+                Some(placeholder),
+                placeholder
+            ));
+            assert!(composer_content_is_empty(
+                Some(&text),
+                Some(""),
+                placeholder
+            ));
+        }
+    }
+
+    #[test]
+    fn conflicting_draft_in_either_pattern_blocks_actions() {
+        let placeholder = "和 Codex 一起工作";
+        for draft in [
+            "保留我的草稿",
+            REVIEW_PROMPT,
+            "随心输入",
+            "与 Codex 协作完成审查",
+        ] {
+            assert!(!composer_content_is_empty(
+                Some(draft),
+                Some(""),
+                placeholder
+            ));
+            assert!(!composer_content_is_empty(
+                Some(placeholder),
+                Some(draft),
+                placeholder
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_patterns_fail_closed_but_single_readable_pattern_works() {
+        assert!(!composer_content_is_empty(None, None, "和 Codex 一起工作"));
+        assert!(composer_content_is_empty(Some(""), None, ""));
+        assert!(composer_content_is_empty(None, Some(""), ""));
+        assert!(composer_content_is_empty(
+            Some("和 Codex 一起工作"),
+            None,
+            ""
+        ));
+        assert!(!composer_content_is_empty(Some("未知内容"), None, ""));
+        assert!(!composer_content_is_empty(None, Some("草稿"), ""));
     }
 
     #[test]

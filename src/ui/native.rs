@@ -30,7 +30,8 @@ use super::review_button::{
 use super::settings::{self as settings_window, WM_APP_SETTINGS_CHANGED};
 use super::target_window;
 use super::tray::{
-    TrayIcon, IDM_DIAGNOSE, IDM_EXIT, IDM_REFRESH, IDM_SETTINGS, IDM_TOGGLE_OVERLAY, WM_APP_TRAY,
+    taskbar_created_message, TrayIcon, IDM_DIAGNOSE, IDM_EXIT, IDM_REFRESH, IDM_SETTINGS,
+    IDM_TOGGLE_OVERLAY, WM_APP_TRAY,
 };
 use crate::formatting::DisplayOptions;
 use crate::settings::{self, SettingsPatch};
@@ -503,6 +504,16 @@ unsafe extern "system" fn host_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let taskbar_created = taskbar_created_message();
+    if taskbar_created != 0 && message == taskbar_created {
+        if let Some(runtime) = runtime_for(hwnd) {
+            runtime.tray.restore(
+                &runtime.state.state,
+                DisplayOptions::from(&runtime.state.settings),
+            );
+        }
+        return LRESULT(0);
+    }
     match message {
         WM_TIMER => {
             if let Some(runtime) = runtime_for(hwnd) {
